@@ -1,28 +1,30 @@
-# OrderFlow Phase 0: Foundation Implementation Plan
+# OrderFlow Phase 0: Foundation Implementation Plan (v0.2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the foundation for OrderFlow — monorepo, database, M365 SSO end-to-end, multi-tenant middleware, RBAC framework, and the UI shell — so Phase 1 can start adding feature code without re-doing infrastructure.
+**Goal:** Build the QMS-grade foundation for OrderFlow — single-company monorepo, M365 SSO behind Cloudflare Access Zero Trust gate, hash-chained immutable audit log, electronic signature framework (21 CFR Part 11), 7-role RBAC with separation-of-duties helpers, and the UI shell — so Phase 1 can start adding business features without redoing infrastructure or compliance scaffolding.
 
-**Architecture:** Bun workspace monorepo with `apps/web` (React + Vite + Tailwind + shadcn) and `apps/api` (Cloudflare Workers + Hono + Drizzle ORM + D1). Auth via Microsoft Entra ID (OIDC PKCE) with HS256 session JWT in HttpOnly cookies. Multi-tenant isolation enforced by middleware + DB query helper. Localhost-only deployment in this phase.
+**Architecture:** Bun workspace monorepo with `apps/web` (React + Vite + Tailwind + shadcn) and `apps/api` (Cloudflare Workers + Hono + Drizzle ORM + D1). **Single-tenant**: no `tenant_id` columns; configuration values (`org_name`, `entra_tenant_id`, etc.) live in a single-row `organization` table. Authentication is two-layer: (1) Cloudflare Access verifies M365 + MFA before any traffic reaches the Worker, (2) application reads `Cf-Access-Jwt-Assertion` header to identify user, then issues a short-lived application session JWT (HttpOnly, 2h absolute, 30min idle). Audit log uses sha256 hash-chain with strict monotonic `seq`. E-signatures require re-authentication and write a paired audit row.
 
-**Tech Stack:** Bun, TypeScript, React 18, Vite, Tailwind, shadcn/ui, TanStack Query, TanStack Router, Hono, Drizzle ORM, Cloudflare D1 (Wrangler local), jose (JWT), Vitest, Playwright.
+**Tech Stack:** Bun, TypeScript, React 18, Vite, Tailwind, shadcn/ui, TanStack Query, TanStack Router, Hono, Drizzle ORM, Cloudflare D1 (Wrangler local), `jose` (JWT + JWKS), Vitest, Playwright, `@cloudflare/cloudflare-access-jwt` (or manual JWKS verify).
 
-**Phase boundary:** This plan ends when a user can log in via M365, see an empty shell with their tenant name and role, and the audit log records the login. No business features (orders/customers) are implemented in this phase — those start in Phase 1.
+**Phase boundary:** Ends when (a) a real M365 user passes Cloudflare Access + completes Entra OIDC PKCE → enters app shell with their name + role visible; (b) `audit_log` records the login as seq=N with verifiable hash chain; (c) the Phase 0 demo "签个名" button triggers the e-signature flow (re-auth + intent confirmation), writes `e_signatures` + `audit_log` rows, and renders a signature manifest snippet. **No business features (orders/customers/NCR) implemented in Phase 0** — those start in Phase 1.
 
 ---
 
 ## Reference Spec
 
 Always cross-check tasks against `/Users/swryociao/orderflow/docs/superpowers/specs/2026-04-30-orderflow-design.md`:
-- §5 Data model (only `tenants`, `users`, `teams`, `sessions`, `audit_log` in this phase)
-- §9 SSO flow
-- §4 RBAC (framework only, full matrix wired in Phase 1)
-- §13 Directory structure
+- §2 法規對照表 (Phase 0 maps to: 11.10(d)/11.10(e)/11.10(g)/11.50/11.70/11.100/11.200)
+- §3 角色與職責分離 (7 roles + SoD framework, full matrix wired in Phase 1)
+- §8 認證、SSO、存取控制 (Cloudflare Access + M365 + session policy)
+- §9 電子簽章 (framework only; concrete uses in Phase 1+)
+- §10 稽核軌跡 (hash chain + immutability triggers)
+- §19 目錄結構
 
 ---
 
-## File Structure (created by this plan)
+## File Structure
 
 ```
 orderflow/
@@ -31,6 +33,7 @@ orderflow/
 ├── tsconfig.base.json
 ├── .gitignore
 ├── .editorconfig
+├── docs/                                # already exists
 ├── apps/
 │   ├── web/
 │   │   ├── package.json
@@ -48,83 +51,114 @@ orderflow/
 │   │   │   │   └── login.tsx
 │   │   │   ├── components/
 │   │   │   │   ├── ui/                 # shadcn
-│   │   │   │   └── shell/
-│   │   │   │       ├── AppShell.tsx
-│   │   │   │       ├── Sidebar.tsx
-│   │   │   │       └── TopBar.tsx
+│   │   │   │   ├── shell/
+│   │   │   │   │   ├── AppShell.tsx
+│   │   │   │   │   ├── Sidebar.tsx
+│   │   │   │   │   └── TopBar.tsx
+│   │   │   │   └── esig/
+│   │   │   │       ├── EsigDialog.tsx
+│   │   │   │       └── EsigDemoButton.tsx
 │   │   │   ├── lib/
-│   │   │   │   ├── api.ts              # fetch helpers
-│   │   │   │   └── auth.ts             # client-side auth helpers
+│   │   │   │   ├── api.ts
+│   │   │   │   ├── auth.ts
+│   │   │   │   └── esig.ts
 │   │   │   ├── i18n/
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── zh-TW.json
 │   │   │   │   └── en.json
-│   │   │   └── styles/
-│   │   │       └── globals.css
+│   │   │   └── styles/globals.css
 │   │   └── tests/
 │   │       └── e2e/
-│   │           └── auth.spec.ts        # Playwright
+│   │           ├── auth.spec.ts
+│   │           ├── esig-demo.spec.ts
+│   │           └── audit-chain.spec.ts
 │   └── api/
 │       ├── package.json
 │       ├── tsconfig.json
 │       ├── wrangler.toml
 │       ├── drizzle.config.ts
 │       ├── src/
-│       │   ├── index.ts                # Hono app entry
-│       │   ├── env.ts                  # bindings + secrets types
+│       │   ├── index.ts                 # Hono app entry
+│       │   ├── env.ts
 │       │   ├── routes/
-│       │   │   ├── auth.ts             # /auth/login /auth/callback /auth/logout /auth/me
-│       │   │   └── health.ts
+│       │   │   ├── health.ts
+│       │   │   ├── auth.ts
+│       │   │   └── esig.ts              # POST /esig/sign + GET /esig/:id
 │       │   ├── auth/
-│       │   │   ├── entra.ts            # OIDC discovery + token exchange
-│       │   │   ├── session.ts          # JWT sign/verify
-│       │   │   ├── middleware.ts       # auth + tenant context
-│       │   │   └── rbac.ts             # role helpers (framework)
+│       │   │   ├── cf-access.ts         # verify Cf-Access-Jwt-Assertion
+│       │   │   ├── entra.ts             # OIDC discovery + token exchange + JWKS verify
+│       │   │   ├── session.ts           # app session JWT
+│       │   │   ├── reauth.ts            # re-auth for e-sig
+│       │   │   ├── middleware.ts        # auth context injection
+│       │   │   └── rbac.ts              # 7-role matrix + SoD helpers
 │       │   ├── db/
-│       │   │   ├── schema.ts           # Drizzle schema
-│       │   │   ├── client.ts           # getDb(tenantId) helper
-│       │   │   └── audit.ts            # audit_log writer
+│       │   │   ├── schema/
+│       │   │   │   ├── organization.ts
+│       │   │   │   ├── users.ts
+│       │   │   │   ├── teams.ts
+│       │   │   │   ├── sessions.ts
+│       │   │   │   ├── audit_log.ts
+│       │   │   │   ├── e_signatures.ts
+│       │   │   │   ├── access_reviews.ts
+│       │   │   │   ├── change_records.ts
+│       │   │   │   └── index.ts
+│       │   │   ├── migrations/
+│       │   │   │   ├── 0000_init.sql
+│       │   │   │   └── 0001_immutable_triggers.sql
+│       │   │   ├── client.ts            # getDb()
+│       │   │   └── audit.ts             # hash-chain writer
+│       │   ├── crypto/
+│       │   │   ├── pkce.ts
+│       │   │   ├── hmac.ts
+│       │   │   ├── sha256.ts
+│       │   │   ├── canonical-json.ts    # deterministic JSON for hashing
+│       │   │   └── hash-chain.ts        # row_hash compute + verify chain
 │       │   ├── lib/
-│       │   │   ├── ulid.ts             # ULID generator
-│       │   │   ├── crypto.ts           # PKCE helpers, HMAC
-│       │   │   └── errors.ts           # AppError + status mapper
-│       │   └── seed.ts                 # dev seed script
-│       ├── migrations/                 # drizzle-kit output
+│       │   │   ├── ulid.ts
+│       │   │   └── errors.ts
+│       │   └── seed.ts                  # dev seed: org + demo users (7 roles)
 │       └── tests/
 │           ├── auth/
-│           │   ├── session.test.ts
-│           │   ├── entra.test.ts
-│           │   └── middleware.test.ts
+│           ├── crypto/
+│           │   ├── canonical-json.test.ts
+│           │   └── hash-chain.test.ts
 │           ├── db/
-│           │   ├── client.test.ts
-│           │   └── audit.test.ts
-│           └── lib/
-│               └── crypto.test.ts
-└── docs/                               # already exists
+│           │   ├── audit-chain.test.ts
+│           │   ├── immutability.test.ts
+│           │   └── e-signatures.test.ts
+│           └── routes/
+│               ├── auth.test.ts
+│               └── esig.test.ts
+└── packages/
+    └── shared/
+        ├── package.json
+        └── src/
+            ├── roles.ts                 # role enum + SoD rules
+            ├── esig-meanings.ts
+            └── index.ts
 ```
 
 ---
 
-## Task 1: Monorepo Skeleton
+## Task List Overview
+
+Week 1: Tasks 1-9 (skeleton, web/api scaffold, schema, immutability, crypto, hash-chain audit, sessions)
+Week 2: Tasks 10-18 (Cloudflare Access verify, Entra OIDC, app session, RBAC, SoD, e-sig flow, UI shell, demo, E2E, verification)
+
+---
+
+### Task 1: Monorepo Skeleton
 
 **Files:**
-- Create: `orderflow/package.json`
-- Create: `orderflow/tsconfig.base.json`
-- Create: `orderflow/.gitignore`
-- Create: `orderflow/.editorconfig`
+- Create: `package.json`, `tsconfig.base.json`, `.gitignore`, `.editorconfig`
 
 - [ ] **Step 1: Verify project root state**
-
 ```bash
-cd /Users/swryociao/orderflow
-git status
-ls -la
+cd /Users/swryociao/orderflow && git status && ls -la
 ```
+Expected: working tree clean, only `docs/` exists.
 
-Expected: only `docs/` directory and prior commits exist. Working tree clean.
-
-- [ ] **Step 2: Create workspace `package.json`**
-
+- [ ] **Step 2: Workspace `package.json`**
 ```json
 {
   "name": "orderflow",
@@ -138,2308 +172,853 @@ Expected: only `docs/` directory and prior commits exist. Working tree clean.
     "test": "bun --cwd apps/api run test && bun --cwd apps/web run test",
     "typecheck": "bun --cwd apps/web run typecheck && bun --cwd apps/api run typecheck"
   },
-  "engines": {
-    "bun": ">=1.1.0"
-  }
+  "engines": { "bun": ">=1.1.0" }
 }
 ```
 
-- [ ] **Step 3: Create `tsconfig.base.json`**
+- [ ] **Step 3: `tsconfig.base.json`** with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `target: ES2022`, `moduleResolution: bundler`.
 
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": false,
-    "resolveJsonModule": true,
-    "lib": ["ES2022"]
-  }
-}
-```
+- [ ] **Step 4: `.gitignore`** (`node_modules`, `dist`, `.wrangler`, `.dev.vars`, `*.log`, `.env*`).
 
-- [ ] **Step 4: Create `.gitignore`**
-
-```
-node_modules/
-dist/
-.wrangler/
-*.log
-.env
-.env.local
-.DS_Store
-.turbo/
-coverage/
-test-results/
-playwright-report/
-```
-
-- [ ] **Step 5: Create `.editorconfig`**
-
-```
-root = true
-
-[*]
-indent_style = space
-indent_size = 2
-end_of_line = lf
-charset = utf-8
-trim_trailing_whitespace = true
-insert_final_newline = true
-```
+- [ ] **Step 5: `.editorconfig`** (LF, UTF-8, 2-space).
 
 - [ ] **Step 6: Commit**
-
 ```bash
 git add package.json tsconfig.base.json .gitignore .editorconfig
-git commit -m "chore: monorepo skeleton (package.json + tsconfig base + gitignore)"
+git commit -m "feat(repo): bun workspace skeleton"
 ```
 
 ---
 
-## Task 2: Web App Scaffold (Vite + React + Tailwind)
+### Task 2: Shared package (roles + e-sig meanings)
 
 **Files:**
-- Create: `apps/web/package.json`
-- Create: `apps/web/tsconfig.json`
-- Create: `apps/web/vite.config.ts`
-- Create: `apps/web/tailwind.config.ts`
-- Create: `apps/web/postcss.config.js`
-- Create: `apps/web/index.html`
-- Create: `apps/web/src/main.tsx`
-- Create: `apps/web/src/App.tsx`
-- Create: `apps/web/src/styles/globals.css`
+- Create: `packages/shared/package.json`, `tsconfig.json`
+- Create: `packages/shared/src/roles.ts`, `esig-meanings.ts`, `index.ts`
+- Test: `packages/shared/test/roles.test.ts`
 
-- [ ] **Step 1: Create `apps/web/package.json`**
+- [ ] **Step 1: Failing test**
+```ts
+import { ROLES, ROLE_RANK, isHigherRole, ESIG_MEANINGS } from '@orderflow/shared';
+it('exports 7 roles in canonical order', () => {
+  expect(ROLES).toEqual(['admin','qa_manager','sales_manager','sales','ops','accountant','viewer']);
+});
+it('ROLE_RANK assigns numeric weight', () => {
+  expect(ROLE_RANK.admin).toBeGreaterThan(ROLE_RANK.viewer);
+});
+it('isHigherRole(qa_manager, sales) === true', () => {
+  expect(isHigherRole('qa_manager','sales')).toBe(true);
+});
+it('ESIG_MEANINGS = review|approval|responsibility|authorship', () => {
+  expect(ESIG_MEANINGS).toEqual(['review','approval','responsibility','authorship']);
+});
+```
 
+- [ ] **Step 2: Implement**
+```ts
+export const ROLES = ['admin','qa_manager','sales_manager','sales','ops','accountant','viewer'] as const;
+export type Role = typeof ROLES[number];
+export const ROLE_RANK: Record<Role, number> = { admin:100, qa_manager:90, sales_manager:80, sales:50, ops:50, accountant:50, viewer:10 };
+export const isHigherRole = (a: Role, b: Role) => ROLE_RANK[a] > ROLE_RANK[b];
+export const ESIG_MEANINGS = ['review','approval','responsibility','authorship'] as const;
+export type EsigMeaning = typeof ESIG_MEANINGS[number];
+```
+
+- [ ] **Step 3: Run test → PASS**
+
+- [ ] **Step 4: Commit**
+
+---
+
+### Task 3: Web app scaffold
+
+**Files:**
+- Create: `apps/web/package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.js`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/styles/globals.css`
+
+- [ ] **Step 1: bun create vite or manual**
+
+`apps/web/package.json`:
 ```json
 {
   "name": "@orderflow/web",
   "private": true,
-  "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5173",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.51.0",
-    "@tanstack/react-router": "^1.45.0",
-    "i18next": "^23.11.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-i18next": "^14.1.0"
+    "react": "^18.3.0", "react-dom": "^18.3.0",
+    "@tanstack/react-query": "^5", "@tanstack/react-router": "^1",
+    "react-hook-form": "^7", "zod": "^3", "@hookform/resolvers": "^3",
+    "clsx": "^2", "tailwind-merge": "^2", "lucide-react": "^0",
+    "@orderflow/shared": "workspace:*"
   },
   "devDependencies": {
-    "@playwright/test": "^1.45.0",
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "autoprefixer": "^10.4.19",
-    "postcss": "^8.4.38",
-    "tailwindcss": "^3.4.4",
-    "typescript": "^5.5.0",
-    "vite": "^5.3.0",
-    "vitest": "^1.6.0"
+    "vite": "^5", "@vitejs/plugin-react": "^4",
+    "tailwindcss": "^3", "postcss": "^8", "autoprefixer": "^10",
+    "typescript": "^5", "vitest": "^1", "@testing-library/react": "^16",
+    "@playwright/test": "^1"
   }
 }
 ```
 
-- [ ] **Step 2: Create `apps/web/tsconfig.json`**
+- [ ] **Step 2: Vite + Tailwind config** (set `host: 'localhost'`, react plugin, Tailwind preset).
 
-```json
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx",
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": false,
-    "noEmit": true,
-    "types": ["vite/client"],
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src", "tests"]
-}
-```
-
-- [ ] **Step 3: Create `apps/web/vite.config.ts`**
-
-```ts
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import path from 'node:path';
-
-export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
-  },
-  server: {
-    proxy: {
-      '/api': 'http://localhost:8787',
-      '/auth': 'http://localhost:8787',
-    },
-  },
-});
-```
-
-- [ ] **Step 4: Create `apps/web/tailwind.config.ts`**
-
-```ts
-import type { Config } from 'tailwindcss';
-
-export default {
-  content: ['./index.html', './src/**/*.{ts,tsx}'],
-  theme: { extend: {} },
-  plugins: [],
-} satisfies Config;
-```
-
-- [ ] **Step 5: Create `apps/web/postcss.config.js`**
-
-```js
-export default {
-  plugins: { tailwindcss: {}, autoprefixer: {} },
-};
-```
-
-- [ ] **Step 6: Create `apps/web/index.html`**
-
-```html
-<!doctype html>
-<html lang="zh-TW">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>OrderFlow</title>
-  </head>
-  <body class="bg-slate-50 text-slate-900">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
-```
-
-- [ ] **Step 7: Create `apps/web/src/styles/globals.css`**
-
-```css
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-html, body, #root { height: 100%; }
-```
-
-- [ ] **Step 8: Create `apps/web/src/main.tsx`**
-
-```tsx
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import App from './App';
-import './styles/globals.css';
-
-const qc = new QueryClient();
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={qc}>
-      <App />
-    </QueryClientProvider>
-  </React.StrictMode>,
-);
-```
-
-- [ ] **Step 9: Create `apps/web/src/App.tsx`**
-
-```tsx
-export default function App() {
-  return (
-    <main className="p-8">
-      <h1 className="text-2xl font-bold">OrderFlow — scaffold</h1>
-      <p className="text-slate-600">If you can read this, the web app is alive.</p>
-    </main>
-  );
-}
-```
-
-- [ ] **Step 10: Install deps and run dev server**
-
+- [ ] **Step 3: Smoke run**
 ```bash
-cd /Users/swryociao/orderflow
-bun install
-bun --cwd apps/web run dev
+cd apps/web && bun install && bun run dev
 ```
+Expected: `http://localhost:5173` shows "OrderFlow".
 
-Expected: dev server boots on `http://localhost:5173` with the heading "OrderFlow — scaffold". Stop with Ctrl+C.
-
-- [ ] **Step 11: Commit**
-
-```bash
-git add apps/web bun.lockb package.json
-git commit -m "feat(web): scaffold Vite + React + Tailwind"
-```
+- [ ] **Step 4: Commit**
 
 ---
 
-## Task 3: API App Scaffold (Workers + Hono)
+### Task 4: API app scaffold (Hono + Drizzle + Wrangler local D1)
 
 **Files:**
-- Create: `apps/api/package.json`
-- Create: `apps/api/tsconfig.json`
-- Create: `apps/api/wrangler.toml`
-- Create: `apps/api/src/env.ts`
-- Create: `apps/api/src/index.ts`
-- Create: `apps/api/src/routes/health.ts`
-- Create: `apps/api/src/lib/errors.ts`
-- Create: `apps/api/tests/setup.ts`
-- Create: `apps/api/vitest.config.ts`
+- Create: `apps/api/package.json`, `tsconfig.json`, `wrangler.toml`, `drizzle.config.ts`, `src/index.ts`, `src/env.ts`, `src/routes/health.ts`
 
-- [ ] **Step 1: Create `apps/api/package.json`**
-
+- [ ] **Step 1: package.json**
 ```json
 {
   "name": "@orderflow/api",
-  "private": true,
-  "version": "0.0.1",
-  "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 8787",
+    "dev": "wrangler dev --local --port 8787",
     "deploy": "wrangler deploy",
-    "test": "vitest run",
+    "test": "vitest --run",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "wrangler d1 migrations apply orderflow_dev --local",
-    "db:seed": "wrangler dev --test-scheduled --port 8788 src/seed.ts"
+    "db:migrate:local": "wrangler d1 migrations apply orderflow --local",
+    "seed:dev": "bun src/seed.ts"
   },
   "dependencies": {
-    "drizzle-orm": "^0.32.0",
-    "hono": "^4.5.0",
-    "jose": "^5.4.0",
-    "ulid": "^2.3.0",
-    "zod": "^3.23.0"
+    "hono": "^4", "@hono/zod-validator": "^0",
+    "drizzle-orm": "^0.30", "drizzle-kit": "^0.20",
+    "jose": "^5", "zod": "^3",
+    "@orderflow/shared": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.4.0",
-    "@cloudflare/workers-types": "^4.20240712.0",
-    "drizzle-kit": "^0.24.0",
-    "typescript": "^5.5.0",
-    "vitest": "^1.6.0",
-    "wrangler": "^3.65.0"
+    "@cloudflare/workers-types": "^4", "wrangler": "^3",
+    "vitest": "^1", "miniflare": "^3", "typescript": "^5"
   }
 }
 ```
 
-- [ ] **Step 2: Create `apps/api/tsconfig.json`**
-
-```json
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "moduleResolution": "bundler",
-    "types": ["@cloudflare/workers-types"],
-    "noEmit": true,
-    "paths": { "@/*": ["./src/*"] }
-  },
-  "include": ["src", "tests"]
-}
-```
-
-- [ ] **Step 3: Create `apps/api/wrangler.toml`**
-
+- [ ] **Step 2: wrangler.toml**
 ```toml
 name = "orderflow-api"
 main = "src/index.ts"
-compatibility_date = "2026-04-01"
+compatibility_date = "2026-04-30"
 compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "orderflow_dev"
-database_id = "00000000-0000-0000-0000-000000000000"   # replaced by wrangler d1 create later
-migrations_dir = "migrations"
-
-[[kv_namespaces]]
-binding = "KV"
-id = "00000000000000000000000000000000"
+database_name = "orderflow"
+database_id = "REPLACE_WITH_REAL_ID"
 
 [vars]
-ENVIRONMENT = "dev"
-ENTRA_AUTHORITY = "https://login.microsoftonline.com/common/v2.0"
-APP_BASE_URL = "http://localhost:5173"
-API_BASE_URL = "http://localhost:8787"
-SESSION_COOKIE_NAME = "of_session"
+ENV = "local"
+SESSION_IDLE_MINUTES = "30"
+SESSION_ABSOLUTE_HOURS = "2"
+ENTRA_TENANT_ID = "REPLACE"
+ENTRA_CLIENT_ID = "REPLACE"
+ENTRA_REDIRECT_URI = "http://localhost:5173/auth/callback"
+CF_ACCESS_TEAM_DOMAIN = "REPLACE"
+CF_ACCESS_AUD = "REPLACE"
 
-# Secrets set via `wrangler secret put` (NOT committed):
-#   ENTRA_CLIENT_ID
-#   ENTRA_CLIENT_SECRET
-#   SESSION_JWT_SECRET   (32+ random bytes, base64)
+# secrets via `wrangler secret put`:
+# ENTRA_CLIENT_SECRET, JWT_SIGNING_KEY, AUDIT_HASH_PEPPER
 ```
 
-- [ ] **Step 4: Create `apps/api/src/env.ts`**
-
-```ts
-export interface Env {
-  DB: D1Database;
-  KV: KVNamespace;
-  ENVIRONMENT: 'dev' | 'staging' | 'prod';
-  ENTRA_AUTHORITY: string;
-  ENTRA_CLIENT_ID: string;
-  ENTRA_CLIENT_SECRET: string;
-  APP_BASE_URL: string;
-  API_BASE_URL: string;
-  SESSION_COOKIE_NAME: string;
-  SESSION_JWT_SECRET: string;
-}
-
-export type AppCtx = {
-  Bindings: Env;
-  Variables: {
-    userId?: string;
-    tenantId?: string;
-    role?: string;
-  };
-};
-```
-
-- [ ] **Step 5: Create `apps/api/src/lib/errors.ts`**
-
-```ts
-export class AppError extends Error {
-  constructor(
-    public status: number,
-    public code: string,
-    message: string,
-    public details?: unknown,
-  ) {
-    super(message);
-  }
-}
-
-export const Errors = {
-  Unauthorized: () => new AppError(401, 'unauthorized', 'Authentication required'),
-  Forbidden: (reason = 'Insufficient permissions') => new AppError(403, 'forbidden', reason),
-  NotFound: (what = 'Resource') => new AppError(404, 'not_found', `${what} not found`),
-  BadRequest: (msg: string, details?: unknown) => new AppError(400, 'bad_request', msg, details),
-  Conflict: (msg: string) => new AppError(409, 'conflict', msg),
-};
-```
-
-- [ ] **Step 6: Create `apps/api/src/routes/health.ts`**
-
+- [ ] **Step 3: Hono entry + /health**
 ```ts
 import { Hono } from 'hono';
-import type { AppCtx } from '../env';
-
-export const health = new Hono<AppCtx>();
-
-health.get('/', (c) =>
-  c.json({ ok: true, env: c.env.ENVIRONMENT, ts: new Date().toISOString() }),
-);
-```
-
-- [ ] **Step 7: Create `apps/api/src/index.ts`**
-
-```ts
-import { Hono } from 'hono';
-import type { AppCtx } from './env';
-import { health } from './routes/health';
-import { AppError } from './lib/errors';
-
-const app = new Hono<AppCtx>();
-
-app.onError((err, c) => {
-  if (err instanceof AppError) {
-    return c.json({ error: err.code, message: err.message, details: err.details }, err.status);
-  }
-  console.error('unhandled', err);
-  return c.json({ error: 'internal_error', message: 'Internal server error' }, 500);
-});
-
-app.route('/api/health', health);
-
+import health from './routes/health';
+const app = new Hono<{ Bindings: Env }>();
+app.route('/health', health);
 export default app;
 ```
 
-- [ ] **Step 8: Create `apps/api/vitest.config.ts`**
-
-```ts
-import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
-
-export default defineWorkersConfig({
-  test: {
-    poolOptions: {
-      workers: {
-        wrangler: { configPath: './wrangler.toml' },
-        miniflare: {
-          d1Databases: ['DB'],
-          kvNamespaces: ['KV'],
-          bindings: {
-            ENVIRONMENT: 'dev',
-            ENTRA_AUTHORITY: 'https://login.microsoftonline.com/common/v2.0',
-            ENTRA_CLIENT_ID: 'test-client',
-            ENTRA_CLIENT_SECRET: 'test-secret',
-            APP_BASE_URL: 'http://localhost:5173',
-            API_BASE_URL: 'http://localhost:8787',
-            SESSION_COOKIE_NAME: 'of_session',
-            SESSION_JWT_SECRET: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          },
-        },
-      },
-    },
-  },
-});
-```
-
-- [ ] **Step 9: Run dev server to verify boot**
-
+- [ ] **Step 4: Smoke**
 ```bash
-cd /Users/swryociao/orderflow
-bun install
-bun --cwd apps/api run dev
+cd apps/api && bun install && bun run dev
+curl http://localhost:8787/health
 ```
+Expected: `{"ok":true,"version":"0.0.1"}`
 
-Expected: `wrangler dev` boots on `http://localhost:8787`. In another terminal: `curl http://localhost:8787/api/health` → returns `{"ok":true,"env":"dev",...}`. Stop with Ctrl+C.
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add apps/api bun.lockb
-git commit -m "feat(api): scaffold Cloudflare Worker + Hono with health route"
-```
+- [ ] **Step 5: Commit**
 
 ---
 
-## Task 4: D1 Database + Drizzle Setup
+### Task 5: Database schema + immutability triggers
 
 **Files:**
+- Create: `apps/api/src/db/schema/organization.ts`, `users.ts`, `teams.ts`, `sessions.ts`, `audit_log.ts`, `e_signatures.ts`, `access_reviews.ts`, `change_records.ts`, `index.ts`
+- Create: `apps/api/src/db/migrations/0000_init.sql`, `0001_immutable_triggers.sql`
 - Create: `apps/api/drizzle.config.ts`
-- Create: `apps/api/src/db/schema.ts`
-- Create: `apps/api/src/db/client.ts`
-- Modify: `apps/api/wrangler.toml` (replace `database_id` after `d1 create`)
+- Test: `apps/api/test/db/schema.test.ts`
 
-- [ ] **Step 1: Create local D1 database**
-
-```bash
-cd /Users/swryociao/orderflow
-bun --cwd apps/api wrangler d1 create orderflow_dev
-```
-
-Expected: outputs a `database_id`. Copy it and paste into `apps/api/wrangler.toml` replacing the placeholder `00000000-0000-0000-0000-000000000000`.
-
-- [ ] **Step 2: Create `apps/api/drizzle.config.ts`**
-
+- [ ] **Step 1: Failing schema test**
 ```ts
-import type { Config } from 'drizzle-kit';
-
-export default {
-  schema: './src/db/schema.ts',
-  out: './migrations',
-  dialect: 'sqlite',
-  driver: 'd1-http',
-  // d1-http config not needed for `generate`; for `push`/`studio` read .dev.vars
-} satisfies Config;
-```
-
-- [ ] **Step 3: Create `apps/api/src/db/schema.ts` (Phase 0 tables only)**
-
-```ts
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
-
-export const tenants = sqliteTable('tenants', {
-  id: text('id').primaryKey(),                     // ULID
-  name: text('name').notNull(),
-  slug: text('slug').notNull().unique(),
-  plan: text('plan').notNull().default('free'),
-  entraTenantId: text('entra_tenant_id'),
-  highValueThreshold: integer('high_value_threshold').notNull().default(1000000),
-  localeDefault: text('locale_default').notNull().default('zh-TW'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+import * as schema from '@/db/schema';
+it('organization is single-row table with org_name + entra_tenant_id', () => {
+  expect(Object.keys(schema.organization)).toEqual(expect.arrayContaining(['id','orgName','entraTenantId']));
 });
-
-export const teams = sqliteTable('teams', {
-  id: text('id').primaryKey(),
-  tenantId: text('tenant_id').notNull().references(() => tenants.id),
-  name: text('name').notNull(),
-  managerUserId: text('manager_user_id'),          // FK added later (avoids circular)
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-}, (t) => ({
-  tenantIdx: index('teams_tenant_idx').on(t.tenantId),
-}));
-
-export const users = sqliteTable('users', {
-  id: text('id').primaryKey(),
-  tenantId: text('tenant_id').notNull().references(() => tenants.id),
-  email: text('email').notNull(),
-  displayName: text('display_name').notNull(),
-  entraOid: text('entra_oid'),
-  role: text('role').notNull().default('viewer'),  // admin/sales_manager/sales/ops/accountant/viewer
-  teamId: text('team_id').references(() => teams.id),
-  status: text('status').notNull().default('active'), // active/suspended/invited
-  teamsUserId: text('teams_user_id'),
-  slackUserId: text('slack_user_id'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-}, (t) => ({
-  tenantEmailIdx: uniqueIndex('users_tenant_email_idx').on(t.tenantId, t.email),
-  tenantOidIdx: uniqueIndex('users_tenant_oid_idx').on(t.tenantId, t.entraOid),
-}));
-
-export const sessions = sqliteTable('sessions', {
-  id: text('id').primaryKey(),
-  userId: text('user_id').notNull().references(() => users.id),
-  tenantId: text('tenant_id').notNull().references(() => tenants.id),
-  deviceLabel: text('device_label'),
-  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
-  lastActiveAt: integer('last_active_at', { mode: 'timestamp_ms' }).notNull(),
-  ip: text('ip'),
-  userAgent: text('user_agent'),
-}, (t) => ({
-  userIdx: index('sessions_user_idx').on(t.userId),
-}));
-
-export const auditLog = sqliteTable('audit_log', {
-  id: text('id').primaryKey(),
-  tenantId: text('tenant_id').notNull().references(() => tenants.id),
-  actorUserId: text('actor_user_id'),
-  actedAsUserId: text('acted_as_user_id'),
-  via: text('via').notNull().default('web'),       // web/mobile/mcp/system
-  action: text('action').notNull(),                // e.g. 'auth.login', 'order.create'
-  targetType: text('target_type'),
-  targetId: text('target_id'),
-  before: text('before'),                          // JSON string
-  after: text('after'),                            // JSON string
-  ip: text('ip'),
-  userAgent: text('user_agent'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-}, (t) => ({
-  tenantTimeIdx: index('audit_tenant_time_idx').on(t.tenantId, t.createdAt),
-}));
+it('users has role + disabled + completed_trainings_json', () => {
+  expect(Object.keys(schema.users)).toEqual(expect.arrayContaining(['id','email','displayName','role','disabled','completedTrainingsJson']));
+});
+it('audit_log has seq + prev_hash + row_hash NOT NULL', () => {
+  expect(Object.keys(schema.auditLog)).toEqual(expect.arrayContaining(['seq','prevHash','rowHash']));
+});
+it('e_signatures has user_name_snapshot, record_hash, prev_audit_hash', () => {
+  expect(Object.keys(schema.eSignatures)).toEqual(expect.arrayContaining(['userNameSnapshot','recordHash','prevAuditHash']));
+});
 ```
 
-- [ ] **Step 4: Create `apps/api/src/db/client.ts`**
+- [ ] **Step 2: SQL migration `0000_init.sql`**
+```sql
+-- Single-row organization config
+CREATE TABLE organization (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  org_name TEXT NOT NULL,
+  entra_tenant_id TEXT NOT NULL,
+  cf_access_team_domain TEXT,
+  cf_access_aud TEXT,
+  retention_years INTEGER NOT NULL DEFAULT 7,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
-```ts
-import { drizzle } from 'drizzle-orm/d1';
-import * as schema from './schema';
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,                    -- ULID
+  email TEXT NOT NULL UNIQUE,
+  entra_oid TEXT UNIQUE,                  -- Entra objectId
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin','qa_manager','sales_manager','sales','ops','accountant','viewer')),
+  team_id TEXT,
+  managed_team_ids_json TEXT NOT NULL DEFAULT '[]',
+  notification_prefs_json TEXT NOT NULL DEFAULT '{}',
+  completed_trainings_json TEXT NOT NULL DEFAULT '[]',
+  disabled INTEGER NOT NULL DEFAULT 0,
+  last_login_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_disabled ON users(disabled);
 
-export type DbClient = ReturnType<typeof drizzle<typeof schema>>;
+CREATE TABLE teams (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  manager_user_id TEXT,
+  created_at TEXT NOT NULL
+);
 
-/**
- * Returns a Drizzle client. The tenantId is **not** baked into the connection
- * (D1 has no row-level security); instead, we expose this helper and require
- * every business query to filter by `tenantId` explicitly. The auth middleware
- * sets `c.var.tenantId` and route handlers MUST use it.
- */
-export function getDb(d1: D1Database): DbClient {
-  return drizzle(d1, { schema });
-}
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  issued_at TEXT NOT NULL,
+  last_active_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  revoked_at TEXT,
+  cf_access_jti TEXT
+);
+CREATE INDEX idx_sessions_user ON sessions(user_id, expires_at);
+
+CREATE TABLE audit_log (
+  id TEXT PRIMARY KEY,                    -- ULID
+  seq INTEGER NOT NULL UNIQUE,            -- monotonic
+  ts TEXT NOT NULL,                       -- ISO UTC
+  actor_user_id TEXT,
+  actor_source TEXT NOT NULL CHECK (actor_source IN ('web','api','mcp','system','cron')),
+  ip_address TEXT,
+  user_agent TEXT,
+  action TEXT NOT NULL,
+  record_type TEXT,
+  record_id TEXT,
+  before_json TEXT,
+  after_json TEXT,
+  metadata_json TEXT,
+  prev_hash TEXT NOT NULL,
+  row_hash TEXT NOT NULL UNIQUE
+);
+CREATE INDEX idx_audit_record ON audit_log(record_type, record_id, ts);
+CREATE INDEX idx_audit_actor ON audit_log(actor_user_id, ts);
+CREATE INDEX idx_audit_seq ON audit_log(seq);
+CREATE INDEX idx_audit_action ON audit_log(action, ts);
+
+CREATE TABLE e_signatures (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  user_name_snapshot TEXT NOT NULL,
+  user_role_snapshot TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  meaning TEXT NOT NULL CHECK (meaning IN ('review','approval','responsibility','authorship')),
+  reason TEXT,
+  record_hash TEXT NOT NULL,
+  signed_at TEXT NOT NULL,
+  reauth_method TEXT NOT NULL CHECK (reauth_method IN ('m365_password','m365_mfa_step_up')),
+  ip_address TEXT,
+  user_agent TEXT,
+  prev_audit_hash TEXT,
+  audit_id TEXT NOT NULL UNIQUE REFERENCES audit_log(id),
+  superseded_by TEXT REFERENCES e_signatures(id)
+);
+CREATE INDEX idx_esig_record ON e_signatures(record_type, record_id);
+CREATE INDEX idx_esig_user ON e_signatures(user_id);
+
+CREATE TABLE access_reviews (
+  id TEXT PRIMARY KEY,
+  period TEXT NOT NULL,                   -- 'YYYY-Q[1-4]'
+  reviewer_id TEXT NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL CHECK (status IN ('open','submitted','closed')),
+  data_json TEXT NOT NULL,
+  esig_id TEXT REFERENCES e_signatures(id),
+  created_at TEXT NOT NULL,
+  closed_at TEXT
+);
+
+CREATE TABLE change_records (
+  id TEXT PRIMARY KEY,
+  change_no TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  risk_level TEXT NOT NULL CHECK (risk_level IN ('low','medium','high')),
+  affected_area TEXT,
+  pr_url TEXT,
+  commit_sha TEXT,
+  status TEXT NOT NULL,
+  esig_admin_id TEXT REFERENCES e_signatures(id),
+  esig_qa_id TEXT REFERENCES e_signatures(id),
+  created_by TEXT NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  approved_at TEXT,
+  deployed_at TEXT
+);
 ```
 
-- [ ] **Step 5: Generate first migration**
+- [ ] **Step 3: SQL migration `0001_immutable_triggers.sql`**
+```sql
+CREATE TRIGGER no_audit_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is immutable'); END;
+CREATE TRIGGER no_audit_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is immutable'); END;
+CREATE TRIGGER no_esig_update BEFORE UPDATE ON e_signatures
+WHEN OLD.superseded_by IS NULL AND NEW.superseded_by IS NULL
+BEGIN SELECT RAISE(ABORT, 'e_signatures core fields are immutable'); END;
+CREATE TRIGGER no_esig_delete BEFORE DELETE ON e_signatures
+BEGIN SELECT RAISE(ABORT, 'e_signatures cannot be deleted'); END;
+```
 
+> Note: `e_signatures` allows updating `superseded_by` only (link to newer sig); the `WHEN` clause permits that single transition.
+
+- [ ] **Step 4: Drizzle schemas** mirror SQL.
+
+- [ ] **Step 5: drizzle.config.ts** points to `src/db/schema/index.ts` + dialect=`sqlite`.
+
+- [ ] **Step 6: Apply locally**
 ```bash
-cd /Users/swryociao/orderflow
-bun --cwd apps/api run db:generate
+cd apps/api && bunx wrangler d1 create orderflow --local
+# Copy database_id into wrangler.toml, then:
+bun run db:migrate:local
 ```
 
-Expected: file appears at `apps/api/migrations/0000_*.sql`.
-
-- [ ] **Step 6: Apply migration to local D1**
-
-```bash
-bun --cwd apps/api run db:migrate
-```
-
-Expected: `Migrations applied`.
-
-- [ ] **Step 7: Sanity check via wrangler**
-
-```bash
-bun --cwd apps/api wrangler d1 execute orderflow_dev --local --command "SELECT name FROM sqlite_master WHERE type='table';"
-```
-
-Expected: lists `tenants`, `users`, `teams`, `sessions`, `audit_log`, plus drizzle's `__drizzle_migrations`.
+- [ ] **Step 7: Test PASS**
 
 - [ ] **Step 8: Commit**
 
-```bash
-git add apps/api/drizzle.config.ts apps/api/src/db apps/api/migrations apps/api/wrangler.toml
-git commit -m "feat(api): D1 schema for tenants/users/teams/sessions/audit_log"
-```
-
 ---
 
-## Task 5: ULID + Crypto Helpers (with tests)
+### Task 6: Crypto helpers — canonical JSON + sha256 + hash chain
 
 **Files:**
-- Create: `apps/api/src/lib/ulid.ts`
-- Create: `apps/api/src/lib/crypto.ts`
-- Create: `apps/api/tests/lib/crypto.test.ts`
+- Create: `apps/api/src/crypto/canonical-json.ts`, `sha256.ts`, `hash-chain.ts`, `pkce.ts`, `hmac.ts`
+- Test: `apps/api/test/crypto/canonical-json.test.ts`, `hash-chain.test.ts`
 
-- [ ] **Step 1: Write failing test for crypto helpers**
-
-Create `apps/api/tests/lib/crypto.test.ts`:
-
+- [ ] **Step 1: Failing canonical-json test**
 ```ts
-import { describe, expect, it } from 'vitest';
-import { generatePkce, hmacShort, randomBase64Url } from '../../src/lib/crypto';
-
-describe('crypto', () => {
-  it('generates a PKCE pair where verifier has 43-128 chars and challenge derives from it', async () => {
-    const { verifier, challenge, method } = await generatePkce();
-    expect(verifier.length).toBeGreaterThanOrEqual(43);
-    expect(verifier.length).toBeLessThanOrEqual(128);
-    expect(method).toBe('S256');
-    expect(challenge).toMatch(/^[A-Za-z0-9_-]+$/); // base64url
-  });
-
-  it('hmacShort returns deterministic 8-char base64url for same input/key', async () => {
-    const a = await hmacShort('order-123', 'secret');
-    const b = await hmacShort('order-123', 'secret');
-    expect(a).toBe(b);
-    expect(a.length).toBe(8);
-    expect(a).toMatch(/^[A-Za-z0-9_-]+$/);
-  });
-
-  it('hmacShort differs for different inputs', async () => {
-    const a = await hmacShort('order-123', 'secret');
-    const b = await hmacShort('order-124', 'secret');
-    expect(a).not.toBe(b);
-  });
-
-  it('randomBase64Url produces requested byte length encoded url-safe', () => {
-    const s = randomBase64Url(32);
-    expect(s).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(s.length).toBe(43); // 32 bytes → 43 chars base64url no pad
-  });
+it('canonical JSON sorts keys recursively', () => {
+  expect(canonicalJson({ b:2, a:{ y:1, x:2 } })).toBe('{"a":{"x":2,"y":1},"b":2}');
+});
+it('null preserved, undefined dropped', () => {
+  expect(canonicalJson({ a:null, b:undefined as any, c:1 })).toBe('{"a":null,"c":1}');
+});
+it('arrays preserve order', () => {
+  expect(canonicalJson([3,1,2])).toBe('[3,1,2]');
 });
 ```
 
-- [ ] **Step 2: Run test to confirm failure**
+- [ ] **Step 2: Implement** stable stringifier (recursive, key sort, drop undefined).
 
-```bash
-bun --cwd apps/api run test -- crypto.test.ts
-```
-
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/lib/crypto.ts`**
-
+- [ ] **Step 3: Failing hash-chain test**
 ```ts
-function toBase64Url(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let str = '';
-  for (let i = 0; i < bytes.byteLength; i++) str += String.fromCharCode(bytes[i]!);
-  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-export function randomBase64Url(byteLen: number): string {
-  const bytes = new Uint8Array(byteLen);
-  crypto.getRandomValues(bytes);
-  return toBase64Url(bytes);
-}
-
-export async function generatePkce(): Promise<{
-  verifier: string;
-  challenge: string;
-  method: 'S256';
-}> {
-  const verifier = randomBase64Url(64); // ~86 chars
-  const enc = new TextEncoder().encode(verifier);
-  const digest = await crypto.subtle.digest('SHA-256', enc);
-  return { verifier, challenge: toBase64Url(digest), method: 'S256' };
-}
-
-export async function hmacShort(message: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
-  return toBase64Url(sig).slice(0, 8);
-}
+it('computeRowHash deterministic given identical input', () => {
+  const a = computeRowHash({ seq:1, ts:'2026-04-30T00:00:00Z', action:'x', prev_hash:'GENESIS' });
+  const b = computeRowHash({ seq:1, ts:'2026-04-30T00:00:00Z', action:'x', prev_hash:'GENESIS' });
+  expect(a).toBe(b);
+});
+it('verifyChain returns ok=true for genuine chain, ok=false + breakAt on tampered row', async () => {
+  const rows = buildSampleChain(5);
+  expect((await verifyChain(rows)).ok).toBe(true);
+  rows[2].after_json = '{"tampered":true}';
+  const r = await verifyChain(rows);
+  expect(r.ok).toBe(false);
+  expect(r.breakAt).toBe(2);
+});
+it('GENESIS is fixed string "0".repeat(64)', () => {
+  expect(GENESIS_PREV_HASH).toBe('0'.repeat(64));
+});
 ```
 
-- [ ] **Step 4: Implement `apps/api/src/lib/ulid.ts`**
+- [ ] **Step 4: Implement** using WebCrypto `subtle.digest('SHA-256', ...)`. `prev_hash` for seq=1 = GENESIS.
 
-```ts
-import { ulid as makeUlid } from 'ulid';
+- [ ] **Step 5: PKCE + HMAC helpers** (`generateCodeVerifier`, `codeChallenge`, `hmacSha256`).
 
-export function newId(): string {
-  return makeUlid();
-}
-```
+- [ ] **Step 6: Tests PASS**
 
-- [ ] **Step 5: Re-run test to verify pass**
-
-```bash
-bun --cwd apps/api run test -- crypto.test.ts
-```
-
-Expected: 4/4 PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add apps/api/src/lib apps/api/tests/lib
-git commit -m "feat(api): crypto helpers (PKCE, HMAC short, base64url) + ULID wrapper"
-```
+- [ ] **Step 7: Commit**
 
 ---
 
-## Task 6: Session JWT (sign / verify)
-
-**Files:**
-- Create: `apps/api/src/auth/session.ts`
-- Create: `apps/api/tests/auth/session.test.ts`
-
-- [ ] **Step 1: Write failing tests**
-
-Create `apps/api/tests/auth/session.test.ts`:
-
-```ts
-import { describe, expect, it } from 'vitest';
-import { signSession, verifySession, type SessionPayload } from '../../src/auth/session';
-
-const SECRET = 'a'.repeat(32);
-
-describe('session jwt', () => {
-  it('signs and verifies a valid token', async () => {
-    const payload: SessionPayload = {
-      sub: 'user_01',
-      tid: 'tenant_01',
-      role: 'sales',
-      sid: 'sess_01',
-    };
-    const token = await signSession(payload, SECRET, 60);
-    const decoded = await verifySession(token, SECRET);
-    expect(decoded.sub).toBe('user_01');
-    expect(decoded.tid).toBe('tenant_01');
-    expect(decoded.role).toBe('sales');
-    expect(decoded.sid).toBe('sess_01');
-  });
-
-  it('rejects an expired token', async () => {
-    const token = await signSession({ sub: 'u', tid: 't', role: 'viewer', sid: 's' }, SECRET, -1);
-    await expect(verifySession(token, SECRET)).rejects.toThrow();
-  });
-
-  it('rejects a token signed with a different secret', async () => {
-    const token = await signSession({ sub: 'u', tid: 't', role: 'viewer', sid: 's' }, SECRET, 60);
-    await expect(verifySession(token, 'b'.repeat(32))).rejects.toThrow();
-  });
-});
-```
-
-- [ ] **Step 2: Run to confirm failure**
-
-```bash
-bun --cwd apps/api run test -- session.test.ts
-```
-
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/auth/session.ts`**
-
-```ts
-import { SignJWT, jwtVerify } from 'jose';
-
-export interface SessionPayload {
-  sub: string;        // user id
-  tid: string;        // tenant id
-  role: string;
-  sid: string;        // session row id (for revocation)
-}
-
-export async function signSession(
-  payload: SessionPayload,
-  secret: string,
-  ttlSeconds: number,
-): Promise<string> {
-  const key = new TextEncoder().encode(secret);
-  return await new SignJWT({ ...payload })
-    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
-    .setIssuedAt()
-    .setExpirationTime(Math.floor(Date.now() / 1000) + ttlSeconds)
-    .setIssuer('orderflow')
-    .setAudience('orderflow-web')
-    .sign(key);
-}
-
-export async function verifySession(token: string, secret: string): Promise<SessionPayload> {
-  const key = new TextEncoder().encode(secret);
-  const { payload } = await jwtVerify(token, key, {
-    issuer: 'orderflow',
-    audience: 'orderflow-web',
-  });
-  const { sub, tid, role, sid } = payload as Record<string, unknown>;
-  if (typeof sub !== 'string' || typeof tid !== 'string' || typeof role !== 'string' || typeof sid !== 'string') {
-    throw new Error('invalid session payload shape');
-  }
-  return { sub, tid, role, sid };
-}
-```
-
-- [ ] **Step 4: Re-run tests to verify pass**
-
-```bash
-bun --cwd apps/api run test -- session.test.ts
-```
-
-Expected: 3/3 PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/api/src/auth/session.ts apps/api/tests/auth/session.test.ts
-git commit -m "feat(api): session JWT sign/verify with HS256 + issuer/audience claims"
-```
-
----
-
-## Task 7: Entra OIDC Helpers (discovery + token exchange + ID token verify)
-
-**Files:**
-- Create: `apps/api/src/auth/entra.ts`
-- Create: `apps/api/tests/auth/entra.test.ts`
-
-- [ ] **Step 1: Write failing tests (using fetch mocking)**
-
-Create `apps/api/tests/auth/entra.test.ts`:
-
-```ts
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { exchangeCodeForTokens, parseIdToken } from '../../src/auth/entra';
-
-const ORIGINAL_FETCH = globalThis.fetch;
-
-afterEach(() => {
-  globalThis.fetch = ORIGINAL_FETCH;
-  vi.restoreAllMocks();
-});
-
-describe('entra', () => {
-  it('exchangeCodeForTokens posts to authority with PKCE verifier and parses tokens', async () => {
-    const fakeTokens = { access_token: 'a', id_token: 'header.payload.sig', expires_in: 3600 };
-    globalThis.fetch = vi.fn(async (input: any, init: any) => {
-      expect(String(input)).toContain('/oauth2/v2.0/token');
-      const body = new URLSearchParams(init.body);
-      expect(body.get('grant_type')).toBe('authorization_code');
-      expect(body.get('code')).toBe('CODE');
-      expect(body.get('code_verifier')).toBe('VERIFIER');
-      expect(body.get('client_id')).toBe('CID');
-      return new Response(JSON.stringify(fakeTokens), { status: 200 });
-    }) as any;
-
-    const out = await exchangeCodeForTokens({
-      authority: 'https://login.microsoftonline.com/common/v2.0',
-      clientId: 'CID',
-      clientSecret: 'CS',
-      code: 'CODE',
-      redirectUri: 'http://localhost:8787/auth/callback',
-      codeVerifier: 'VERIFIER',
-    });
-    expect(out.id_token).toBe('header.payload.sig');
-  });
-
-  it('parseIdToken extracts oid/email/tid/name from a known JWT payload', () => {
-    const payload = {
-      oid: 'oid-123',
-      email: 'user@example.com',
-      preferred_username: 'user@example.com',
-      name: 'Test User',
-      tid: 'tenant-abc',
-    };
-    const b64 = (o: unknown) =>
-      btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const fake = `${b64({ alg: 'RS256' })}.${b64(payload)}.sig`;
-    const out = parseIdToken(fake);
-    expect(out.oid).toBe('oid-123');
-    expect(out.email).toBe('user@example.com');
-    expect(out.tid).toBe('tenant-abc');
-    expect(out.name).toBe('Test User');
-  });
-});
-```
-
-> Note: full JWKS verification of the id_token signature is **NOT** done in Phase 0 (deferred to Phase 1 hardening). For dev we trust the token returned by the same TLS-secured POST that authenticated us. We document this as a known gap.
-
-- [ ] **Step 2: Run to confirm failure**
-
-```bash
-bun --cwd apps/api run test -- entra.test.ts
-```
-
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/auth/entra.ts`**
-
-```ts
-export interface TokenResponse {
-  access_token: string;
-  id_token: string;
-  expires_in: number;
-  refresh_token?: string;
-}
-
-export interface IdTokenClaims {
-  oid: string;
-  email: string;
-  tid: string;
-  name: string;
-}
-
-export async function exchangeCodeForTokens(input: {
-  authority: string;
-  clientId: string;
-  clientSecret: string;
-  code: string;
-  redirectUri: string;
-  codeVerifier: string;
-}): Promise<TokenResponse> {
-  const tokenUrl = `${input.authority.replace(/\/$/, '')}/oauth2/v2.0/token`;
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: input.clientId,
-    client_secret: input.clientSecret,
-    code: input.code,
-    redirect_uri: input.redirectUri,
-    code_verifier: input.codeVerifier,
-    scope: 'openid profile email offline_access',
-  });
-  const res = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Entra token exchange failed: ${res.status} ${text}`);
-  }
-  return (await res.json()) as TokenResponse;
-}
-
-export function parseIdToken(idToken: string): IdTokenClaims {
-  const parts = idToken.split('.');
-  if (parts.length < 2) throw new Error('invalid id_token');
-  const b64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-  const json = atob(padded);
-  const claims = JSON.parse(json) as Record<string, unknown>;
-  const oid = claims.oid;
-  const email = claims.email ?? claims.preferred_username;
-  const tid = claims.tid;
-  const name = claims.name;
-  if (typeof oid !== 'string' || typeof email !== 'string' || typeof tid !== 'string' || typeof name !== 'string') {
-    throw new Error('id_token missing required claims');
-  }
-  return { oid, email, tid, name };
-}
-```
-
-- [ ] **Step 4: Re-run tests**
-
-```bash
-bun --cwd apps/api run test -- entra.test.ts
-```
-
-Expected: 2/2 PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/api/src/auth/entra.ts apps/api/tests/auth/entra.test.ts
-git commit -m "feat(api): Entra OIDC code exchange + id_token claim parsing (no JWKS yet)"
-```
-
----
-
-## Task 8: Audit Log Writer
+### Task 7: Audit log writer (hash-chain, in-transaction)
 
 **Files:**
 - Create: `apps/api/src/db/audit.ts`
-- Create: `apps/api/tests/db/audit.test.ts`
+- Test: `apps/api/test/db/audit-chain.test.ts`, `immutability.test.ts`
 
-- [ ] **Step 1: Write failing test**
-
-Create `apps/api/tests/db/audit.test.ts`:
-
+- [ ] **Step 1: Failing test — chain integrity**
 ```ts
-import { describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
-import { drizzle } from 'drizzle-orm/d1';
-import { eq } from 'drizzle-orm';
-import { writeAudit } from '../../src/db/audit';
-import * as schema from '../../src/db/schema';
-
-describe('writeAudit', () => {
-  it('inserts an audit row with provided fields', async () => {
-    const db = drizzle(env.DB, { schema });
-    // pre-seed a tenant row that audit_log FK points to
-    await db.insert(schema.tenants).values({
-      id: 'tenant_test',
-      name: 'Test',
-      slug: 'test',
-      plan: 'free',
-      highValueThreshold: 1000000,
-      localeDefault: 'zh-TW',
-      createdAt: new Date(),
-    });
-    await writeAudit(db, {
-      tenantId: 'tenant_test',
-      actorUserId: 'user_test',
-      via: 'web',
-      action: 'auth.login',
-      ip: '127.0.0.1',
-      userAgent: 'vitest',
-    });
-    const rows = await db.select().from(schema.auditLog).where(eq(schema.auditLog.tenantId, 'tenant_test'));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.action).toBe('auth.login');
-    expect(rows[0]!.via).toBe('web');
-  });
+it('writeAudit increments seq, links prev_hash to last row, computes row_hash', async () => {
+  const a = await writeAudit(db, { actorUserId:'u1', actorSource:'web', action:'login', recordType:'session', recordId:'s1' });
+  const b = await writeAudit(db, { actorUserId:'u1', actorSource:'web', action:'page.view', recordType:'page', recordId:'/dashboard' });
+  expect(a.seq).toBe(1); expect(a.prevHash).toBe(GENESIS_PREV_HASH);
+  expect(b.seq).toBe(2); expect(b.prevHash).toBe(a.rowHash);
+});
+it('parallel writes serialize via D1 tx — no duplicate seq', async () => {
+  const proms = Array.from({length:10}, (_,i) => writeAudit(db, { action:`a${i}`, actorSource:'system' }));
+  const out = await Promise.all(proms);
+  const seqs = out.map(o=>o.seq).sort((x,y)=>x-y);
+  expect(seqs).toEqual([1,2,3,4,5,6,7,8,9,10]);
 });
 ```
 
-- [ ] **Step 2: Run to confirm failure**
-
-```bash
-bun --cwd apps/api run test -- audit.test.ts
+- [ ] **Step 2: Failing test — immutability**
+```ts
+it('UPDATE on audit_log row throws "audit_log is immutable"', async () => {
+  await expect(db.run(sql`UPDATE audit_log SET action='x' WHERE seq=1`)).rejects.toThrow(/immutable/);
+});
+it('DELETE on audit_log row throws', async () => {
+  await expect(db.run(sql`DELETE FROM audit_log WHERE seq=1`)).rejects.toThrow();
+});
 ```
 
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/db/audit.ts`**
-
+- [ ] **Step 3: Implement**
 ```ts
-import type { DbClient } from './client';
-import { auditLog } from './schema';
-import { newId } from '../lib/ulid';
-
-export interface AuditInput {
-  tenantId: string;
-  actorUserId?: string;
-  actedAsUserId?: string;
-  via?: 'web' | 'mobile' | 'mcp' | 'system';
-  action: string;
-  targetType?: string;
-  targetId?: string;
-  before?: unknown;
-  after?: unknown;
-  ip?: string;
-  userAgent?: string;
-}
-
-export async function writeAudit(db: DbClient, input: AuditInput): Promise<void> {
-  await db.insert(auditLog).values({
-    id: newId(),
-    tenantId: input.tenantId,
-    actorUserId: input.actorUserId ?? null,
-    actedAsUserId: input.actedAsUserId ?? null,
-    via: input.via ?? 'web',
-    action: input.action,
-    targetType: input.targetType ?? null,
-    targetId: input.targetId ?? null,
-    before: input.before === undefined ? null : JSON.stringify(input.before),
-    after: input.after === undefined ? null : JSON.stringify(input.after),
-    ip: input.ip ?? null,
-    userAgent: input.userAgent ?? null,
-    createdAt: new Date(),
+export async function writeAudit(db, payload) {
+  return db.transaction(async (tx) => {
+    const last = await tx.query.auditLog.findFirst({ orderBy: desc(auditLog.seq) });
+    const seq = (last?.seq ?? 0) + 1;
+    const prevHash = last?.rowHash ?? GENESIS_PREV_HASH;
+    const ts = new Date().toISOString();
+    const id = ulid();
+    const fields = { id, seq, ts, prevHash, ...payload };
+    const rowHash = await computeRowHash(fields);
+    await tx.insert(auditLog).values({ ...fields, rowHash });
+    return { ...fields, rowHash };
   });
 }
 ```
 
-- [ ] **Step 4: Re-run test**
-
-```bash
-bun --cwd apps/api run test -- audit.test.ts
-```
-
-Expected: 1/1 PASS.
+- [ ] **Step 4: Tests PASS**
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/api/src/db/audit.ts apps/api/tests/db/audit.test.ts
-git commit -m "feat(api): audit log writer with JSON before/after serialization"
+---
+
+### Task 8: Application session JWT (idle + absolute)
+
+**Files:**
+- Create: `apps/api/src/auth/session.ts`
+- Test: `apps/api/test/auth/session.test.ts`
+
+- [ ] **Step 1: Failing test**
+```ts
+it('signSession includes uid, role, iat, idle_exp, abs_exp; HS256 with JWT_SIGNING_KEY', async () => { /* ... */ });
+it('verifySession returns ok=false when now > abs_exp', async () => { /* ... */ });
+it('verifySession returns ok=false when now > idle_exp; renewIdle bumps idle_exp not abs_exp', async () => {
+  const tok = await signSession({ uid:'u1', role:'sales' });
+  await sleep(31 * 60 * 1000); // simulate via fake timers
+  const r = await verifySession(tok);
+  expect(r.ok).toBe(false);
+  expect(r.reason).toBe('idle_timeout');
+});
+it('absolute exp = 2h from initial sign even after multiple renewals', async () => { /* ... */ });
 ```
+
+- [ ] **Step 2: Implement** with `jose` HS256. Token claims:
+```ts
+{ uid, role, sid, iat, idle_exp, abs_exp }
+```
+`renewIdle(token)` issues new token with `idle_exp = now + 30min`, keeps `abs_exp` unchanged.
+
+- [ ] **Step 3: HttpOnly Secure SameSite=Strict cookie helpers**.
+
+- [ ] **Step 4: Commit**
 
 ---
 
-## Task 9: Auth Middleware (cookie → session → context)
+### Task 9: Cloudflare Access JWT verifier
 
 **Files:**
-- Create: `apps/api/src/auth/middleware.ts`
-- Create: `apps/api/tests/auth/middleware.test.ts`
+- Create: `apps/api/src/auth/cf-access.ts`
+- Test: `apps/api/test/auth/cf-access.test.ts`
 
-- [ ] **Step 1: Write failing test**
-
-Create `apps/api/tests/auth/middleware.test.ts`:
-
+- [ ] **Step 1: Failing test (mocked JWKS)**
 ```ts
-import { describe, expect, it } from 'vitest';
-import { Hono } from 'hono';
-import { env } from 'cloudflare:test';
-import type { AppCtx } from '../../src/env';
-import { requireAuth } from '../../src/auth/middleware';
-import { signSession } from '../../src/auth/session';
+it('verifyCfAccess fetches JWKS from team domain, verifies signature, checks aud', async () => { /* ... */ });
+it('rejects token with wrong aud', async () => { /* ... */ });
+it('rejects expired token', async () => { /* ... */ });
+it('extracts email + identity_nonce + sub from valid token', async () => { /* ... */ });
+```
 
-function buildApp() {
-  const app = new Hono<AppCtx>();
-  app.use('*', requireAuth);
-  app.get('/me', (c) =>
-    c.json({ userId: c.var.userId, tenantId: c.var.tenantId, role: c.var.role }),
-  );
-  return app;
+- [ ] **Step 2: Implement** using `jose.createRemoteJWKSet(new URL('https://${TEAM_DOMAIN}.cloudflareaccess.com/cdn-cgi/access/certs'))` with 1h cache.
+
+- [ ] **Step 3: Implement local-dev bypass**
+```ts
+if (env.ENV === 'local' && req.headers.get('X-Local-Bypass') === env.LOCAL_BYPASS_TOKEN) {
+  return { email: 'dev@local', sub: 'dev-sub', mfa: true };
 }
+```
+Document in DEV.md that production must NOT set `LOCAL_BYPASS_TOKEN`.
 
-describe('requireAuth middleware', () => {
-  it('returns 401 when no cookie', async () => {
-    const res = await buildApp().request('/me', {}, env);
-    expect(res.status).toBe(401);
-  });
+- [ ] **Step 4: Commit**
 
-  it('attaches userId/tenantId/role on valid cookie', async () => {
-    const token = await signSession(
-      { sub: 'u1', tid: 't1', role: 'admin', sid: 's1' },
-      env.SESSION_JWT_SECRET,
-      60,
-    );
-    const res = await buildApp().request(
-      '/me',
-      { headers: { cookie: `${env.SESSION_COOKIE_NAME}=${token}` } },
-      env,
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ userId: 'u1', tenantId: 't1', role: 'admin' });
-  });
+---
 
-  it('returns 401 on tampered cookie', async () => {
-    const res = await buildApp().request(
-      '/me',
-      { headers: { cookie: `${env.SESSION_COOKIE_NAME}=garbage` } },
-      env,
-    );
-    expect(res.status).toBe(401);
-  });
+### Task 10: Entra OIDC PKCE flow (post-Cloudflare Access)
+
+**Files:**
+- Create: `apps/api/src/auth/entra.ts`
+- Create: `apps/api/src/routes/auth.ts`
+- Test: `apps/api/test/auth/entra.test.ts`, `routes/auth.test.ts`
+
+- [ ] **Step 1: Failing test**
+```ts
+it('GET /auth/login: requires CF Access JWT, generates PKCE pair, sets state cookie, redirects to /authorize with code_challenge', async () => { /* ... */ });
+it('GET /auth/callback: validates state, exchanges code for tokens via PKCE, verifies ID token JWKS + tenant_id + aud + amr contains "mfa", upserts users row, issues app session, writes audit "login.success"', async () => { /* ... */ });
+it('callback rejects when amr lacks "mfa"', async () => { /* ... */ });
+it('callback rejects when ID token tid != ENTRA_TENANT_ID', async () => { /* ... */ });
+it('callback fails closed when CF Access email != ID token preferred_username', async () => { /* ... */ });
+```
+
+- [ ] **Step 2: Implement** discovery (`/.well-known/openid-configuration`), token exchange, JWKS verify, claim checks. **CF Access email must match Entra preferred_username** — if mismatch, hard fail (defense in depth).
+
+- [ ] **Step 3: User upsert** by `entra_oid` first, fallback by email; preserve `role` and `disabled` if existing.
+
+- [ ] **Step 4: GET /auth/me** returns `{ id, email, displayName, role, teamId }` from session.
+
+- [ ] **Step 5: POST /auth/logout** revokes session + writes audit.
+
+- [ ] **Step 6: Tests PASS**
+
+- [ ] **Step 7: Commit**
+
+---
+
+### Task 11: Auth middleware + RBAC + SoD helpers
+
+**Files:**
+- Create: `apps/api/src/auth/middleware.ts`, `rbac.ts`
+- Test: `apps/api/test/auth/middleware.test.ts`, `rbac.test.ts`
+
+- [ ] **Step 1: Failing test**
+```ts
+it('requireSession: rejects missing/expired session 401', async () => { /* ... */ });
+it('requireSession: bumps idle_exp on success and re-issues cookie', async () => { /* ... */ });
+it('requireRole(["admin","qa_manager"]): rejects "sales" with 403, accepts "admin"', async () => { /* ... */ });
+it('requireSoD enforces creator !== approver: throws 409 when creatorId === approverId', async () => {
+  expect(() => requireSoD({ rule:'SoD-1', creatorId:'u1', approverId:'u1' })).toThrow(/separation of duties/);
 });
+it('requireDisabledFalse: throws 403 if user.disabled', async () => { /* ... */ });
 ```
 
-- [ ] **Step 2: Run to confirm failure**
-
-```bash
-bun --cwd apps/api run test -- middleware.test.ts
-```
-
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/auth/middleware.ts`**
-
+- [ ] **Step 2: Implement**
 ```ts
-import type { MiddlewareHandler } from 'hono';
-import type { AppCtx } from '../env';
-import { verifySession } from './session';
-import { Errors } from '../lib/errors';
-
-function readCookie(header: string | null, name: string): string | null {
-  if (!header) return null;
-  const parts = header.split(/;\s*/);
-  for (const p of parts) {
-    const eq = p.indexOf('=');
-    if (eq < 0) continue;
-    if (p.slice(0, eq) === name) return decodeURIComponent(p.slice(eq + 1));
-  }
-  return null;
-}
-
-export const requireAuth: MiddlewareHandler<AppCtx> = async (c, next) => {
-  const token = readCookie(c.req.header('cookie') ?? null, c.env.SESSION_COOKIE_NAME);
-  if (!token) throw Errors.Unauthorized();
-  let payload;
-  try {
-    payload = await verifySession(token, c.env.SESSION_JWT_SECRET);
-  } catch {
-    throw Errors.Unauthorized();
-  }
-  c.set('userId', payload.sub);
-  c.set('tenantId', payload.tid);
-  c.set('role', payload.role);
+export const requireRole = (allowed: Role[]) => async (c, next) => {
+  const u = c.var.user;
+  if (!allowed.includes(u.role)) throw new AppError('forbidden', 403);
   await next();
 };
+export function requireSoD({ rule, creatorId, approverId }) {
+  if (creatorId === approverId) throw new AppError(`separation of duties violation (${rule})`, 409);
+}
 ```
 
-- [ ] **Step 4: Re-run test**
+- [ ] **Step 3: Tests PASS**
 
-```bash
-bun --cwd apps/api run test -- middleware.test.ts
-```
-
-Expected: 3/3 PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/api/src/auth/middleware.ts apps/api/tests/auth/middleware.test.ts
-git commit -m "feat(api): requireAuth middleware reads session cookie + populates ctx"
-```
+- [ ] **Step 4: Commit**
 
 ---
 
-## Task 10: RBAC Helpers (framework, full matrix in Phase 1)
+### Task 12: Re-auth endpoint (for e-sig)
 
 **Files:**
-- Create: `apps/api/src/auth/rbac.ts`
-- Create: `apps/api/tests/auth/rbac.test.ts`
+- Create: `apps/api/src/auth/reauth.ts`
+- Modify: `apps/api/src/routes/auth.ts` (POST /auth/reauth)
+- Test: `apps/api/test/auth/reauth.test.ts`
 
-- [ ] **Step 1: Write failing test**
-
-Create `apps/api/tests/auth/rbac.test.ts`:
-
+- [ ] **Step 1: Failing test**
 ```ts
-import { describe, expect, it } from 'vitest';
-import { hasRole, requireRole, ROLES, type Role } from '../../src/auth/rbac';
-import { Errors } from '../../src/lib/errors';
-
-describe('rbac', () => {
-  it('hasRole returns true when role is in allowed list', () => {
-    expect(hasRole('admin', ['admin', 'sales_manager'])).toBe(true);
-    expect(hasRole('sales', ['admin'])).toBe(false);
-  });
-
-  it('requireRole throws Forbidden when role is not allowed', () => {
-    expect(() => requireRole('viewer', ['admin'])).toThrowError(/forbidden/i);
-  });
-
-  it('requireRole returns void on allowed role', () => {
-    expect(requireRole('admin', ['admin'])).toBeUndefined();
-  });
-
-  it('ROLES list matches the spec (6 roles)', () => {
-    expect(ROLES).toEqual([
-      'admin',
-      'sales_manager',
-      'sales',
-      'ops',
-      'accountant',
-      'viewer',
-    ] satisfies Role[]);
-  });
-});
+it('POST /auth/reauth/init returns ROPC=false (we do not use ROPC) + step_up_url for MFA challenge', async () => { /* ... */ });
+it('POST /auth/reauth/complete with MFA-elevated CF Access token issues a 2-min reauth_token tied to current session', async () => { /* ... */ });
+it('reauth_token has aud="esig", linked to session id', async () => { /* ... */ });
 ```
 
-- [ ] **Step 2: Run to confirm failure**
+- [ ] **Step 2: Implement** — re-auth uses Cloudflare Access "purpose justification + step-up MFA" flow:
+  1. Client calls `/auth/reauth/init` → server returns `step_up_url` pointing to Cloudflare Access force-MFA URL
+  2. Client opens popup → user re-MFA's → CF Access issues fresh JWT with `iat` ≤ 60s
+  3. Client calls `/auth/reauth/complete` with new CF Access token → server verifies freshness + matches session user → issues 2-min `reauth_token` (HS256 JWT, aud=esig)
 
-```bash
-bun --cwd apps/api run test -- rbac.test.ts
-```
+- [ ] **Step 3: Reauth_token used as proof in next 120s for `/esig/sign`**.
 
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `apps/api/src/auth/rbac.ts`**
-
-```ts
-import { Errors } from '../lib/errors';
-
-export const ROLES = ['admin', 'sales_manager', 'sales', 'ops', 'accountant', 'viewer'] as const;
-export type Role = typeof ROLES[number];
-
-export function isRole(x: unknown): x is Role {
-  return typeof x === 'string' && (ROLES as readonly string[]).includes(x);
-}
-
-export function hasRole(role: string, allowed: readonly Role[]): boolean {
-  return (allowed as readonly string[]).includes(role);
-}
-
-export function requireRole(role: string, allowed: readonly Role[]): void {
-  if (!hasRole(role, allowed)) {
-    throw Errors.Forbidden(`role '${role}' not in [${allowed.join(', ')}]`);
-  }
-}
-```
-
-- [ ] **Step 4: Re-run test**
-
-```bash
-bun --cwd apps/api run test -- rbac.test.ts
-```
-
-Expected: 4/4 PASS.
+- [ ] **Step 4: Tests PASS**
 
 - [ ] **Step 5: Commit**
 
-```bash
-git add apps/api/src/auth/rbac.ts apps/api/tests/auth/rbac.test.ts
-git commit -m "feat(api): rbac role list + hasRole/requireRole helpers (matrix wired in Phase 1)"
-```
-
 ---
 
-## Task 11: Auth Routes (login redirect / callback / me / logout)
+### Task 13: E-signature signing route
 
 **Files:**
-- Create: `apps/api/src/routes/auth.ts`
-- Modify: `apps/api/src/index.ts` (mount /auth and /api/me)
-- Create: `apps/api/tests/auth/routes.test.ts`
+- Create: `apps/api/src/routes/esig.ts`
+- Test: `apps/api/test/routes/esig.test.ts`
 
-- [ ] **Step 1: Write failing test for /auth/login redirect**
-
-Create `apps/api/tests/auth/routes.test.ts`:
-
+- [ ] **Step 1: Failing test**
 ```ts
-import { describe, expect, it } from 'vitest';
-import { env } from 'cloudflare:test';
-import app from '../../src/index';
-
-describe('GET /auth/login', () => {
-  it('returns a 302 redirect to Microsoft authorize endpoint', async () => {
-    const res = await app.request('/auth/login', {}, env);
-    expect(res.status).toBe(302);
-    const loc = res.headers.get('location') ?? '';
-    expect(loc).toContain('login.microsoftonline.com');
-    expect(loc).toContain('client_id=');
-    expect(loc).toContain('code_challenge=');
-    expect(loc).toContain('code_challenge_method=S256');
-    expect(loc).toContain('response_type=code');
+it('POST /esig/sign requires reauth_token; rejects without with 401', async () => { /* ... */ });
+it('signs record: writes audit_log row + e_signatures row in same tx; record_hash = sha256(canonical(record_payload))', async () => {
+  const recordPayload = { id:'demo-1', kind:'phase0_demo', text:'I confirm reading the policy' };
+  const res = await app.request('/esig/sign', {
+    method:'POST', headers:{ ...auth, 'X-Reauth-Token': reauthToken },
+    body: JSON.stringify({
+      record_type:'phase0_demo', record_id:'demo-1',
+      record_payload: recordPayload, meaning:'authorship', reason:'Phase 0 demo'
+    })
   });
+  expect(res.status).toBe(201);
+  const body = await res.json();
+  expect(body.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/); // ULID
+  // audit log seq incremented:
+  const [aud] = await db.select().from(auditLog).where(eq(auditLog.id, body.audit_id));
+  expect(aud.action).toBe('esig.signed');
 });
-
-describe('GET /api/me without cookie', () => {
-  it('returns 401', async () => {
-    const res = await app.request('/api/me', {}, env);
-    expect(res.status).toBe(401);
-  });
-});
+it('record_hash is deterministic for same payload', async () => { /* ... */ });
+it('user_name_snapshot frozen at sign time even if user.displayName changes later', async () => { /* ... */ });
+it('GET /esig/:id returns full sig with signer name + meaning + record_hash', async () => { /* ... */ });
 ```
 
-- [ ] **Step 2: Run to confirm failure**
-
-```bash
-bun --cwd apps/api run test -- routes.test.ts
-```
-
-Expected: FAIL — `/auth/login` 404.
-
-- [ ] **Step 3: Implement `apps/api/src/routes/auth.ts`**
-
+- [ ] **Step 2: Implement**
 ```ts
-import { Hono } from 'hono';
-import { eq, and } from 'drizzle-orm';
-import type { AppCtx } from '../env';
-import { generatePkce, randomBase64Url } from '../lib/crypto';
-import { exchangeCodeForTokens, parseIdToken } from '../auth/entra';
-import { signSession } from '../auth/session';
-import { newId } from '../lib/ulid';
-import { getDb } from '../db/client';
-import { tenants, users, sessions } from '../db/schema';
-import { writeAudit } from '../db/audit';
-import { Errors } from '../lib/errors';
-
-export const auth = new Hono<AppCtx>();
-
-const STATE_TTL_SECONDS = 600; // 10 min
-
-auth.get('/login', async (c) => {
-  const next = c.req.query('next') ?? '/';
-  const { verifier, challenge } = await generatePkce();
-  const state = randomBase64Url(16);
-  await c.env.KV.put(`oauth_state:${state}`, JSON.stringify({ verifier, next }), {
-    expirationTtl: STATE_TTL_SECONDS,
-  });
-  const url = new URL(c.env.ENTRA_AUTHORITY.replace(/\/$/, '') + '/oauth2/v2.0/authorize');
-  url.searchParams.set('client_id', c.env.ENTRA_CLIENT_ID);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('redirect_uri', c.env.API_BASE_URL + '/auth/callback');
-  url.searchParams.set('scope', 'openid profile email offline_access');
-  url.searchParams.set('response_mode', 'query');
-  url.searchParams.set('state', state);
-  url.searchParams.set('code_challenge', challenge);
-  url.searchParams.set('code_challenge_method', 'S256');
-  return c.redirect(url.toString(), 302);
-});
-
-auth.get('/callback', async (c) => {
-  const code = c.req.query('code');
-  const state = c.req.query('state');
-  if (!code || !state) throw Errors.BadRequest('missing code or state');
-  const stateRaw = await c.env.KV.get(`oauth_state:${state}`);
-  if (!stateRaw) throw Errors.BadRequest('invalid or expired state');
-  await c.env.KV.delete(`oauth_state:${state}`);
-  const { verifier, next } = JSON.parse(stateRaw) as { verifier: string; next: string };
-
-  const tokens = await exchangeCodeForTokens({
-    authority: c.env.ENTRA_AUTHORITY,
-    clientId: c.env.ENTRA_CLIENT_ID,
-    clientSecret: c.env.ENTRA_CLIENT_SECRET,
-    code,
-    redirectUri: c.env.API_BASE_URL + '/auth/callback',
-    codeVerifier: verifier,
-  });
-  const claims = parseIdToken(tokens.id_token);
-
-  const db = getDb(c.env.DB);
-
-  // 1. Find or refuse tenant by Entra tid
-  const tenantRows = await db.select().from(tenants).where(eq(tenants.entraTenantId, claims.tid)).limit(1);
-  const tenant = tenantRows[0];
-  if (!tenant) {
-    throw Errors.Forbidden(`no OrderFlow tenant linked to Entra tenant ${claims.tid}`);
-  }
-
-  // 2. Upsert user
-  const existing = await db
-    .select()
-    .from(users)
-    .where(and(eq(users.tenantId, tenant.id), eq(users.entraOid, claims.oid)))
-    .limit(1);
-  let userRow = existing[0];
-  if (!userRow) {
-    const id = newId();
-    await db.insert(users).values({
-      id,
-      tenantId: tenant.id,
-      email: claims.email,
-      displayName: claims.name,
-      entraOid: claims.oid,
-      role: 'viewer',
-      status: 'active',
-      createdAt: new Date(),
+esigRoute.post('/sign', requireSession, requireReauthToken(), async (c) => {
+  const body = await c.req.json();
+  const u = c.var.user;
+  const recordHash = await sha256Hex(canonicalJson(body.record_payload));
+  return await db.transaction(async (tx) => {
+    const audit = await writeAudit(tx, {
+      actorUserId: u.id, actorSource:'web', action:'esig.signed',
+      recordType: body.record_type, recordId: body.record_id,
+      metadataJson: JSON.stringify({ meaning: body.meaning, reason: body.reason, record_hash: recordHash }),
     });
-    userRow = (await db.select().from(users).where(eq(users.id, id)).limit(1))[0]!;
-  }
-
-  // 3. Create session row
-  const sessionId = newId();
-  const sessionTtlSec = 60 * 60 * 24 * 7;
-  await db.insert(sessions).values({
-    id: sessionId,
-    userId: userRow.id,
-    tenantId: tenant.id,
-    deviceLabel: c.req.header('user-agent') ?? null,
-    expiresAt: new Date(Date.now() + sessionTtlSec * 1000),
-    lastActiveAt: new Date(),
-    ip: c.req.header('cf-connecting-ip') ?? null,
-    userAgent: c.req.header('user-agent') ?? null,
-  });
-
-  // 4. Sign session JWT
-  const jwt = await signSession(
-    { sub: userRow.id, tid: tenant.id, role: userRow.role, sid: sessionId },
-    c.env.SESSION_JWT_SECRET,
-    sessionTtlSec,
-  );
-
-  // 5. Audit
-  await writeAudit(db, {
-    tenantId: tenant.id,
-    actorUserId: userRow.id,
-    via: 'web',
-    action: 'auth.login',
-    ip: c.req.header('cf-connecting-ip') ?? undefined,
-    userAgent: c.req.header('user-agent') ?? undefined,
-  });
-
-  // 6. Set cookie + redirect to web app
-  const cookie = [
-    `${c.env.SESSION_COOKIE_NAME}=${jwt}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    `Max-Age=${sessionTtlSec}`,
-    c.env.ENVIRONMENT === 'dev' ? '' : 'Secure',
-  ]
-    .filter(Boolean)
-    .join('; ');
-
-  return new Response(null, {
-    status: 302,
-    headers: {
-      location: c.env.APP_BASE_URL + (next.startsWith('/') ? next : '/'),
-      'set-cookie': cookie,
-    },
-  });
-});
-
-auth.post('/logout', async (c) => {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'set-cookie': `${c.env.SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax`,
-    },
+    const sig = {
+      id: ulid(), userId: u.id,
+      userNameSnapshot: u.displayName, userRoleSnapshot: u.role,
+      recordType: body.record_type, recordId: body.record_id,
+      meaning: body.meaning, reason: body.reason ?? null,
+      recordHash, signedAt: new Date().toISOString(),
+      reauthMethod: c.var.reauthMethod, ipAddress: c.req.header('cf-connecting-ip'),
+      userAgent: c.req.header('user-agent'), prevAuditHash: audit.prevHash, auditId: audit.id,
+    };
+    await tx.insert(eSignatures).values(sig);
+    return c.json({ ...sig, audit_id: audit.id }, 201);
   });
 });
 ```
 
-- [ ] **Step 4: Add `/api/me` and mount auth routes — modify `apps/api/src/index.ts`**
+- [ ] **Step 3: Reauth_token consumed once** (KV nonce blacklist).
 
-```ts
-import { Hono } from 'hono';
-import type { AppCtx } from './env';
-import { health } from './routes/health';
-import { auth } from './routes/auth';
-import { requireAuth } from './auth/middleware';
-import { getDb } from './db/client';
-import { users } from './db/schema';
-import { eq, and } from 'drizzle-orm';
-import { AppError } from './lib/errors';
+- [ ] **Step 4: Tests PASS**
 
-const app = new Hono<AppCtx>();
-
-app.onError((err, c) => {
-  if (err instanceof AppError) {
-    return c.json({ error: err.code, message: err.message, details: err.details }, err.status);
-  }
-  console.error('unhandled', err);
-  return c.json({ error: 'internal_error', message: 'Internal server error' }, 500);
-});
-
-app.route('/api/health', health);
-app.route('/auth', auth);
-
-app.use('/api/*', requireAuth);
-
-app.get('/api/me', async (c) => {
-  const db = getDb(c.env.DB);
-  const rows = await db
-    .select()
-    .from(users)
-    .where(and(eq(users.id, c.var.userId!), eq(users.tenantId, c.var.tenantId!)))
-    .limit(1);
-  const u = rows[0];
-  if (!u) return c.json({ error: 'not_found' }, 404);
-  return c.json({
-    id: u.id,
-    email: u.email,
-    displayName: u.displayName,
-    role: u.role,
-    tenantId: u.tenantId,
-  });
-});
-
-export default app;
-```
-
-- [ ] **Step 5: Re-run tests**
-
-```bash
-bun --cwd apps/api run test -- routes.test.ts
-```
-
-Expected: 2/2 PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add apps/api/src/routes/auth.ts apps/api/src/index.ts apps/api/tests/auth/routes.test.ts
-git commit -m "feat(api): /auth/login + /auth/callback + /auth/logout + /api/me"
-```
+- [ ] **Step 5: Commit**
 
 ---
 
-## Task 12: Dev Seed Script + Manual SSO Smoke Test
+### Task 14: Dev seed (organization + 7-role demo users)
 
 **Files:**
 - Create: `apps/api/src/seed.ts`
-- Create: `apps/api/.dev.vars.example`
+- Test: `apps/api/test/seed.test.ts`
 
-- [ ] **Step 1: Create `apps/api/src/seed.ts`**
+- [ ] **Step 1: Failing test** — `bun src/seed.ts` populates `organization` (1 row) + 7 demo users covering all roles + 2 teams.
 
+- [ ] **Step 2: Implement**
 ```ts
-/**
- * Seeds a single tenant + admin user for local dev.
- * Run with: bun --cwd apps/api wrangler d1 execute orderflow_dev --local --file=seed.sql
- * (or: bun run scripts/seed.ts via a custom wrangler invocation)
- *
- * For convenience we just emit SQL statements that the developer can paste.
- */
-import { newId } from './lib/ulid';
-
-const tenantId = 'tenant_dev_01';
-const userId = newId();
-
-const sql = [
-  `INSERT INTO tenants (id, name, slug, plan, entra_tenant_id, high_value_threshold, locale_default, created_at)
-   VALUES ('${tenantId}', 'Dev Tenant', 'dev', 'free', 'REPLACE_WITH_YOUR_ENTRA_TID', 1000000, 'zh-TW', ${Date.now()});`,
-  `INSERT INTO users (id, tenant_id, email, display_name, entra_oid, role, status, created_at)
-   VALUES ('${userId}', '${tenantId}', 'REPLACE_WITH_YOUR_EMAIL', 'Dev Admin', 'REPLACE_WITH_YOUR_ENTRA_OID', 'admin', 'active', ${Date.now()});`,
+await db.insert(organization).values({ id:1, orgName:'Demo Medical Co.', entraTenantId:'demo-tenant', retentionYears:7, /* ... */ });
+const users = [
+  { email:'admin@demo', displayName:'系統管理員', role:'admin' },
+  { email:'qa@demo', displayName:'品保主管', role:'qa_manager' },
+  { email:'smgr@demo', displayName:'業務主管', role:'sales_manager' },
+  { email:'sales@demo', displayName:'業務員', role:'sales' },
+  { email:'ops@demo', displayName:'生產員', role:'ops' },
+  { email:'acct@demo', displayName:'會計', role:'accountant' },
+  { email:'audit@demo', displayName:'稽核員', role:'viewer' },
 ];
-
-console.log(sql.join('\n'));
+for (const u of users) await db.insert(usersTable).values({ id: ulid(), ...u, /* ... */ });
 ```
 
-- [ ] **Step 2: Create `apps/api/.dev.vars.example`**
+- [ ] **Step 3: Genesis audit row** — write `seq=1, action='system.bootstrap', prev_hash=GENESIS`.
 
-```bash
-# Copy to .dev.vars (which is gitignored) and fill in real values from Azure portal.
-
-ENTRA_CLIENT_ID="00000000-0000-0000-0000-000000000000"
-ENTRA_CLIENT_SECRET="paste-azure-app-secret"
-SESSION_JWT_SECRET="generate-with: openssl rand -base64 48"
-```
-
-- [ ] **Step 3: Document the manual one-time setup**
-
-Add to `apps/api/.dev.vars.example` at the top:
-
-```
-# One-time setup before running `bun run dev`:
-#
-# 1. In Azure portal:
-#    - Create an App registration (multi-tenant or single tenant — your choice)
-#    - Add redirect URI: http://localhost:8787/auth/callback
-#    - Note the Application (client) ID and Directory (tenant) ID
-#    - Generate a client secret
-#
-# 2. Generate a session secret:
-#      openssl rand -base64 48
-#
-# 3. Copy this file to .dev.vars and fill in the values above.
-#
-# 4. Generate seed SQL:
-#      bun --cwd apps/api run -e ./src/seed.ts > seed.sql
-#    Edit seed.sql, replacing REPLACE_WITH_* with:
-#      - Your Entra tenant ID (Directory ID)
-#      - Your work email
-#      - Your Entra Object ID (find in Azure portal → Users → your account → Object ID)
-#
-# 5. Apply seed:
-#      bun --cwd apps/api wrangler d1 execute orderflow_dev --local --file=seed.sql
-#
-# 6. Start servers (two terminals):
-#      bun run dev:api
-#      bun run dev:web
-#
-# 7. Open http://localhost:5173/login → click "Sign in with Microsoft"
-```
-
-- [ ] **Step 4: Manual smoke test**
-
-(This step is documentation for the implementer — automated E2E that talks to real M365 is not feasible.)
-
-Document expected behavior in the README to be created in Task 15.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/api/src/seed.ts apps/api/.dev.vars.example
-git commit -m "chore(api): dev seed script + .dev.vars example with setup docs"
-```
+- [ ] **Step 4: Commit**
 
 ---
 
-## Task 13: i18n Setup (zh-TW + en)
+### Task 15: i18n (zh-TW + en)
 
 **Files:**
-- Create: `apps/web/src/i18n/index.ts`
-- Create: `apps/web/src/i18n/zh-TW.json`
-- Create: `apps/web/src/i18n/en.json`
-- Modify: `apps/web/src/main.tsx` (init i18n before render)
+- Create: `apps/web/src/i18n/index.ts`, `zh-TW.json`, `en.json`
+- Test: `apps/web/test/i18n.test.ts`
 
-- [ ] **Step 1: Create `apps/web/src/i18n/zh-TW.json`**
+- [ ] **Step 1: Failing test** — `t('app.title')` resolves both locales; missing key throws in dev, returns key in prod.
 
-```json
-{
-  "app": { "title": "OrderFlow", "loading": "載入中…" },
-  "auth": {
-    "signIn": "以 Microsoft 帳號登入",
-    "signInTitle": "登入 OrderFlow",
-    "signInSubtitle": "使用您的公司 Microsoft 365 帳號登入",
-    "signOut": "登出",
-    "signedOut": "已登出"
-  },
-  "nav": {
-    "dashboard": "儀表板",
-    "orders": "訂單",
-    "customers": "客戶",
-    "reports": "報表",
-    "settings": "設定"
-  },
-  "shell": {
-    "tenant": "租戶",
-    "role": "角色",
-    "roles": {
-      "admin": "管理員",
-      "sales_manager": "業務主管",
-      "sales": "業務",
-      "ops": "生產 / 倉管",
-      "accountant": "會計",
-      "viewer": "檢視者"
-    }
-  }
-}
-```
+- [ ] **Step 2: Implement** light wrapper (no i18next dep — small JSON map + Context).
 
-- [ ] **Step 2: Create `apps/web/src/i18n/en.json`**
+- [ ] **Step 3: Seed strings** for: app title, login, logout, role names, e-sig dialog labels (姓名/意涵/簽章時間/原因/我已閱讀並同意/取消).
 
-```json
-{
-  "app": { "title": "OrderFlow", "loading": "Loading…" },
-  "auth": {
-    "signIn": "Sign in with Microsoft",
-    "signInTitle": "Sign in to OrderFlow",
-    "signInSubtitle": "Use your company Microsoft 365 account",
-    "signOut": "Sign out",
-    "signedOut": "Signed out"
-  },
-  "nav": {
-    "dashboard": "Dashboard",
-    "orders": "Orders",
-    "customers": "Customers",
-    "reports": "Reports",
-    "settings": "Settings"
-  },
-  "shell": {
-    "tenant": "Tenant",
-    "role": "Role",
-    "roles": {
-      "admin": "Admin",
-      "sales_manager": "Sales Manager",
-      "sales": "Sales",
-      "ops": "Operations",
-      "accountant": "Accountant",
-      "viewer": "Viewer"
-    }
-  }
-}
-```
-
-- [ ] **Step 3: Create `apps/web/src/i18n/index.ts`**
-
-```ts
-import i18n from 'i18next';
-import { initReactI18next } from 'react-i18next';
-import zhTW from './zh-TW.json';
-import en from './en.json';
-
-void i18n.use(initReactI18next).init({
-  resources: { 'zh-TW': { translation: zhTW }, en: { translation: en } },
-  lng: 'zh-TW',
-  fallbackLng: 'en',
-  interpolation: { escapeValue: false },
-});
-
-export default i18n;
-```
-
-- [ ] **Step 4: Update `apps/web/src/main.tsx` to init i18n**
-
-```tsx
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import App from './App';
-import './styles/globals.css';
-import './i18n';
-
-const qc = new QueryClient();
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={qc}>
-      <App />
-    </QueryClientProvider>
-  </React.StrictMode>,
-);
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/web/src/i18n apps/web/src/main.tsx
-git commit -m "feat(web): i18next setup with zh-TW (default) + en"
-```
+- [ ] **Step 4: Commit**
 
 ---
 
-## Task 14: UI Shell + Login Page + Post-Login Dashboard
+### Task 16: UI shell + Login + E-sig dialog + Demo button
 
 **Files:**
-- Create: `apps/web/src/lib/api.ts`
-- Create: `apps/web/src/lib/auth.ts`
-- Create: `apps/web/src/components/shell/AppShell.tsx`
-- Create: `apps/web/src/components/shell/Sidebar.tsx`
-- Create: `apps/web/src/components/shell/TopBar.tsx`
-- Create: `apps/web/src/routes/login.tsx`
-- Create: `apps/web/src/routes/index.tsx`
-- Modify: `apps/web/src/App.tsx`
+- Create: `apps/web/src/routes/__root.tsx`, `index.tsx`, `login.tsx`
+- Create: `apps/web/src/components/shell/AppShell.tsx`, `Sidebar.tsx`, `TopBar.tsx`
+- Create: `apps/web/src/components/esig/EsigDialog.tsx`, `EsigDemoButton.tsx`
+- Create: `apps/web/src/lib/api.ts`, `auth.ts`, `esig.ts`
 
-- [ ] **Step 1: Create `apps/web/src/lib/api.ts`**
+- [ ] **Step 1: Implement TopBar** showing `displayName + role badge + logout`.
 
-```ts
-export class ApiError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message);
-  }
-}
+- [ ] **Step 2: Implement EsigDialog** — props: `recordType`, `recordId`, `recordPayload`, `meaning`, `onSigned`. Flow: shows record summary → reason field → step-up MFA popup → calls `/esig/sign` → renders signature manifestation snippet.
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { credentials: 'include', ...init });
-  if (!res.ok) {
-    let body: { error?: string; message?: string } = {};
-    try { body = await res.json(); } catch {}
-    throw new ApiError(res.status, body.error ?? 'unknown', body.message ?? res.statusText);
-  }
-  return (await res.json()) as T;
-}
-```
+- [ ] **Step 3: Implement Login flow** — `/login` → button "M365 SSO" → redirect to `/api/auth/login` → callback handled by API → cookie set → redirect to `/`.
 
-- [ ] **Step 2: Create `apps/web/src/lib/auth.ts`**
+- [ ] **Step 4: Dashboard page** shows: org name, current user info, "Phase 0 Demo: 簽署一筆 demo 紀錄" button → opens EsigDialog → on success shows signed record + "查看 audit 鏈" link.
 
-```ts
-import { useQuery } from '@tanstack/react-query';
-import { api, ApiError } from './api';
+- [ ] **Step 5: Audit chain viewer** (admin/qa_manager/viewer only) — fetch `/audit?limit=20` → render table with seq + action + actor + ts + row_hash[:8].
 
-export interface Me {
-  id: string;
-  email: string;
-  displayName: string;
-  role: 'admin' | 'sales_manager' | 'sales' | 'ops' | 'accountant' | 'viewer';
-  tenantId: string;
-}
-
-export function useMe() {
-  return useQuery({
-    queryKey: ['me'],
-    queryFn: async () => {
-      try {
-        return await api<Me>('/api/me');
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 401) return null;
-        throw e;
-      }
-    },
-    staleTime: 60_000,
-  });
-}
-
-export function loginUrl(next: string = window.location.pathname) {
-  return `/auth/login?next=${encodeURIComponent(next)}`;
-}
-
-export async function logout() {
-  await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
-  window.location.href = '/login';
-}
-```
-
-- [ ] **Step 3: Create `apps/web/src/components/shell/Sidebar.tsx`**
-
-```tsx
-import { useTranslation } from 'react-i18next';
-
-const NAV = [
-  { key: 'dashboard', href: '/', enabled: true },
-  { key: 'orders', href: '/orders', enabled: false },
-  { key: 'customers', href: '/customers', enabled: false },
-  { key: 'reports', href: '/reports', enabled: false },
-  { key: 'settings', href: '/settings', enabled: false },
-] as const;
-
-export function Sidebar() {
-  const { t } = useTranslation();
-  return (
-    <aside className="w-56 shrink-0 border-r border-slate-200 bg-white p-4">
-      <div className="mb-6 text-xl font-bold">{t('app.title')}</div>
-      <nav className="flex flex-col gap-1">
-        {NAV.map((item) => (
-          <a
-            key={item.key}
-            href={item.href}
-            aria-disabled={!item.enabled}
-            className={`rounded px-3 py-2 text-sm ${
-              item.enabled
-                ? 'text-slate-700 hover:bg-slate-100'
-                : 'cursor-not-allowed text-slate-400'
-            }`}
-          >
-            {t(`nav.${item.key}`)}
-          </a>
-        ))}
-      </nav>
-    </aside>
-  );
-}
-```
-
-- [ ] **Step 4: Create `apps/web/src/components/shell/TopBar.tsx`**
-
-```tsx
-import { useTranslation } from 'react-i18next';
-import { logout, type Me } from '@/lib/auth';
-
-export function TopBar({ me }: { me: Me }) {
-  const { t } = useTranslation();
-  return (
-    <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
-      <div className="text-sm text-slate-500">
-        {t('shell.tenant')}: <span className="font-medium text-slate-700">{me.tenantId}</span>
-        <span className="mx-3">·</span>
-        {t('shell.role')}: <span className="font-medium text-slate-700">{t(`shell.roles.${me.role}`)}</span>
-      </div>
-      <div className="flex items-center gap-3">
-        <span className="text-sm text-slate-600">{me.displayName}</span>
-        <button
-          onClick={() => void logout()}
-          className="rounded border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
-        >
-          {t('auth.signOut')}
-        </button>
-      </div>
-    </header>
-  );
-}
-```
-
-- [ ] **Step 5: Create `apps/web/src/components/shell/AppShell.tsx`**
-
-```tsx
-import type { ReactNode } from 'react';
-import { Sidebar } from './Sidebar';
-import { TopBar } from './TopBar';
-import type { Me } from '@/lib/auth';
-
-export function AppShell({ me, children }: { me: Me; children: ReactNode }) {
-  return (
-    <div className="flex h-full">
-      <Sidebar />
-      <div className="flex flex-1 flex-col">
-        <TopBar me={me} />
-        <main className="flex-1 overflow-auto p-6">{children}</main>
-      </div>
-    </div>
-  );
-}
-```
-
-- [ ] **Step 6: Create `apps/web/src/routes/login.tsx`**
-
-```tsx
-import { useTranslation } from 'react-i18next';
-import { loginUrl } from '@/lib/auth';
-
-export function LoginPage() {
-  const { t } = useTranslation();
-  const next = new URLSearchParams(window.location.search).get('next') ?? '/';
-  return (
-    <div className="flex h-full items-center justify-center bg-slate-50">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
-        <h1 className="mb-2 text-2xl font-bold">{t('auth.signInTitle')}</h1>
-        <p className="mb-6 text-sm text-slate-600">{t('auth.signInSubtitle')}</p>
-        <a
-          href={loginUrl(next)}
-          className="block w-full rounded bg-slate-900 px-4 py-2 text-center text-sm font-medium text-white hover:bg-slate-800"
-        >
-          {t('auth.signIn')}
-        </a>
-      </div>
-    </div>
-  );
-}
-```
-
-- [ ] **Step 7: Create `apps/web/src/routes/index.tsx`**
-
-```tsx
-import { useTranslation } from 'react-i18next';
-import { AppShell } from '@/components/shell/AppShell';
-import type { Me } from '@/lib/auth';
-
-export function DashboardPage({ me }: { me: Me }) {
-  const { t } = useTranslation();
-  return (
-    <AppShell me={me}>
-      <h1 className="mb-2 text-2xl font-bold">{t('nav.dashboard')}</h1>
-      <p className="text-slate-600">
-        Welcome, <strong>{me.displayName}</strong>. Phase 0 shell is live. Phase 1 features begin
-        rolling in next sprint.
-      </p>
-    </AppShell>
-  );
-}
-```
-
-- [ ] **Step 8: Replace `apps/web/src/App.tsx` with router-less guard**
-
-```tsx
-import { useEffect } from 'react';
-import { useMe } from '@/lib/auth';
-import { LoginPage } from '@/routes/login';
-import { DashboardPage } from '@/routes/index';
-
-export default function App() {
-  const { data: me, isLoading } = useMe();
-  const path = window.location.pathname;
-
-  useEffect(() => {
-    if (!isLoading && !me && path !== '/login') {
-      window.location.href = `/login?next=${encodeURIComponent(path)}`;
-    }
-  }, [isLoading, me, path]);
-
-  if (isLoading) return <div className="p-8">Loading…</div>;
-  if (!me) return <LoginPage />;
-  return <DashboardPage me={me} />;
-}
-```
-
-> **Phase 1 will swap this for TanStack Router with file-based routing.** For Phase 0 we use a minimal switch to avoid pulling routing complexity into the foundation.
-
-- [ ] **Step 9: Run dev servers and visit manually**
-
-```bash
-# Terminal 1
-bun run dev:api
-# Terminal 2
-bun run dev:web
-```
-
-Open `http://localhost:5173/`. Without a session you should be redirected to `/login`. The sign-in button targets `/auth/login` (proxied to the Worker on 8787).
-
-Stop servers with Ctrl+C.
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add apps/web/src
-git commit -m "feat(web): shell + login + dashboard with i18n + /api/me integration"
-```
+- [ ] **Step 6: Commit**
 
 ---
 
-## Task 15: Playwright E2E (Login Redirect + Health) + README
+### Task 17: E2E — login + e-sig + audit chain verify
 
 **Files:**
-- Create: `apps/web/playwright.config.ts`
-- Create: `apps/web/tests/e2e/auth.spec.ts`
-- Create: `orderflow/README.md`
+- Create: `apps/web/tests/e2e/auth.spec.ts`, `esig-demo.spec.ts`, `audit-chain.spec.ts`
 
-- [ ] **Step 1: Create `apps/web/playwright.config.ts`**
-
+- [ ] **Step 1: Auth E2E**
 ```ts
-import { defineConfig, devices } from '@playwright/test';
-
-export default defineConfig({
-  testDir: './tests/e2e',
-  timeout: 30_000,
-  fullyParallel: false,
-  retries: 0,
-  use: {
-    baseURL: 'http://localhost:5173',
-    trace: 'on-first-retry',
-  },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-});
-```
-
-- [ ] **Step 2: Create `apps/web/tests/e2e/auth.spec.ts`**
-
-```ts
-import { test, expect } from '@playwright/test';
-
-test('unauthenticated home redirects to /login', async ({ page }) => {
-  await page.goto('/');
-  await expect(page).toHaveURL(/\/login/);
-  await expect(page.getByRole('heading', { name: /登入 OrderFlow|Sign in to OrderFlow/ })).toBeVisible();
-});
-
-test('login page sign-in link points to /auth/login', async ({ page }) => {
+test('M365 mock SSO login → dashboard shows display name + role', async ({ page }) => {
+  await mockCfAccess(page, { email:'qa@demo' });
+  await mockEntra(page, { oid:'qa-oid', tid: ENTRA_TENANT_ID, amr:['mfa'], preferred_username:'qa@demo' });
   await page.goto('/login');
-  const link = page.getByRole('link', { name: /Microsoft/ });
-  const href = await link.getAttribute('href');
-  expect(href).toMatch(/^\/auth\/login(\?next=.*)?$/);
-});
-
-test('api health endpoint responds when API is up', async ({ request }) => {
-  const res = await request.get('http://localhost:8787/api/health');
-  expect(res.ok()).toBeTruthy();
-  const body = await res.json();
-  expect(body.ok).toBe(true);
+  await page.click('button:has-text("M365 SSO")');
+  await expect(page).toHaveURL('/');
+  await expect(page.getByTestId('user-display')).toHaveText('品保主管');
+  await expect(page.getByTestId('user-role')).toHaveText('qa_manager');
 });
 ```
 
-- [ ] **Step 3: Run E2E (assuming dev servers are running)**
-
-```bash
-# Terminal 1
-bun run dev:api
-# Terminal 2
-bun run dev:web
-# Terminal 3
-bun --cwd apps/web exec playwright install chromium
-bun --cwd apps/web run test:e2e
+- [ ] **Step 2: E-sig demo E2E**
+```ts
+test('Phase 0 demo: sign and verify audit row created', async ({ page }) => {
+  await loginAs(page, 'qa_manager');
+  await page.click('button:has-text("簽署一筆 demo")');
+  await page.fill('textarea[name=reason]', 'Phase 0 verification');
+  await mockReauth(page);  // step-up MFA mock
+  await page.click('button:has-text("我已閱讀並同意")');
+  await expect(page.getByTestId('signed-confirmation')).toBeVisible();
+  await expect(page.getByTestId('signed-name')).toHaveText('品保主管');
+  await expect(page.getByTestId('signed-meaning')).toHaveText('authorship');
+});
 ```
 
-Expected: 3/3 PASS.
-
-- [ ] **Step 4: Create `orderflow/README.md`**
-
-```markdown
-# OrderFlow
-
-Multi-tenant business project & shipment tracking system. Phase 0 (Foundation) — local development only.
-
-## Prerequisites
-
-- Bun ≥ 1.1
-- A Microsoft Entra app registration with redirect URI `http://localhost:8787/auth/callback`
-
-## Setup
-
-```bash
-bun install
-
-# 1. Create local D1
-bun --cwd apps/api wrangler d1 create orderflow_dev
-# (paste the printed database_id into apps/api/wrangler.toml)
-
-# 2. Apply migrations
-bun --cwd apps/api run db:migrate
-
-# 3. Configure secrets
-cp apps/api/.dev.vars.example apps/api/.dev.vars
-# Fill in ENTRA_CLIENT_ID, ENTRA_CLIENT_SECRET, SESSION_JWT_SECRET
-
-# 4. Seed your dev tenant + admin user
-bun --cwd apps/api bun run src/seed.ts > seed.sql
-# Edit seed.sql, replacing REPLACE_WITH_* placeholders. Then:
-bun --cwd apps/api wrangler d1 execute orderflow_dev --local --file=seed.sql
+- [ ] **Step 3: Audit chain integrity E2E**
+```ts
+test('audit chain verifier returns ok=true after several events', async ({ page, request }) => {
+  await loginAs(page, 'admin');
+  await page.click('text=系統 → 稽核軌跡完整性檢查');
+  await expect(page.getByTestId('chain-status')).toHaveText('OK');
+  await expect(page.getByTestId('chain-rows')).toContainText(/[\d]+ 筆/);
+});
 ```
 
-## Run
-
-```bash
-# Terminal 1
-bun run dev:api      # Worker on http://localhost:8787
-
-# Terminal 2
-bun run dev:web      # Vite on http://localhost:5173
-```
-
-Open `http://localhost:5173`. You'll be redirected to `/login` and can sign in with Microsoft.
-
-## Tests
-
-```bash
-bun run test                     # api + web unit tests
-bun --cwd apps/web run test:e2e  # Playwright (requires both servers running)
-bun run typecheck
-```
-
-## Project layout
-
-See `docs/superpowers/specs/2026-04-30-orderflow-design.md` §13.
-
-## Known Phase-0 limitations (resolved in Phase 1+)
-
-- ID token signature is **not** verified against Entra JWKS (we trust the TLS-secured token endpoint response). This is acceptable for dev; Phase 1 hardening adds JWKS verification.
-- No business features (orders, customers, stages) — only the auth/shell foundation.
-- TanStack Router file-based routing is deferred — App.tsx uses a minimal switch.
-```
+- [ ] **Step 4: Tests PASS**
 
 - [ ] **Step 5: Commit**
 
+---
+
+### Task 18: Phase 0 verification + checklist
+
+**Files:**
+- Create: `docs/validation/phase0-iq.md`, `phase0-oq.md`
+- Modify: `README.md`
+
+- [ ] **Step 1: IQ checklist** (Installation Qualification)
+- [ ] D1 `orderflow` 建立 + migrations applied
+- [ ] R2 buckets `orderflow-docs` + `orderflow-immutable` 建立（Phase 4 才實際使用，先建）
+- [ ] Wrangler secrets set: `JWT_SIGNING_KEY`, `AUDIT_HASH_PEPPER`, `ENTRA_CLIENT_SECRET`
+- [ ] Cloudflare Access app created, policy: M365 + MFA required
+- [ ] Entra app registered, redirect URI matches
+- [ ] DNS: `orderflow.internal.<company>.com` resolves to Pages
+
+- [ ] **Step 2: OQ checklist** (Operational Qualification)
+- [ ] Login through real M365 (not mock) → audit_log row 寫入 with `action='login.success'` + valid hash chain
+- [ ] Try expired session → 401 + redirect to /login
+- [ ] Try non-MFA session (mock amr=[]) → rejected
+- [ ] Sign demo record → e_signatures row created + audit_log paired row
+- [ ] Attempt UPDATE audit_log → trigger blocks
+- [ ] Attempt DELETE e_signatures → trigger blocks
+- [ ] Run `bun src/scripts/verify-chain.ts` → reports OK + N rows
+- [ ] Disable a user (UPDATE users SET disabled=1) → next login blocked
+- [ ] requireSoD throws 409 when creatorId===approverId
+
+- [ ] **Step 3: Tag**
 ```bash
-git add apps/web/playwright.config.ts apps/web/tests/e2e README.md
-git commit -m "test(web): Playwright E2E for login redirect + health + README"
+git tag -a v0.0.1-phase0 -m "Phase 0 foundation complete: SSO + audit chain + e-sig framework"
+```
+
+- [ ] **Step 4: Final commit**
+```bash
+git add docs/validation README.md
+git commit -m "docs(phase0): IQ/OQ checklists + verification"
 ```
 
 ---
 
-## Task 16: Final Phase-0 Verification
+## Phase 0 Done When
 
-- [ ] **Step 1: Run all unit tests**
-
-```bash
-cd /Users/swryociao/orderflow
-bun run test
-```
-
-Expected: all api tests pass.
-
-- [ ] **Step 2: Typecheck**
-
-```bash
-bun run typecheck
-```
-
-Expected: no errors.
-
-- [ ] **Step 3: Run Playwright (with dev servers up)**
-
-```bash
-# Terminal 1: bun run dev:api
-# Terminal 2: bun run dev:web
-bun --cwd apps/web run test:e2e
-```
-
-Expected: 3/3 pass.
-
-- [ ] **Step 4: Manual SSO smoke test**
-
-1. Sign in via `http://localhost:5173/login` → redirected to Microsoft → back to dashboard
-2. Dashboard shows your `displayName`, tenant id, role badge
-3. `wrangler d1 execute orderflow_dev --local --command "SELECT action, actor_user_id, created_at FROM audit_log ORDER BY created_at DESC LIMIT 5;"` shows an `auth.login` row
-4. Click "Sign out" → redirected to `/login` → trying `/` again redirects to login
-
-Document the screenshots in `docs/phase-0-verification.md` (optional).
-
-- [ ] **Step 5: Tag the milestone**
-
-```bash
-git tag -a phase-0-complete -m "Phase 0 foundation complete"
-git log --oneline -20
-```
-
-- [ ] **Step 6: Final commit (if README updates)**
-
-```bash
-git add -A
-git diff --cached --quiet || git commit -m "chore: phase 0 verification doc"
-```
-
----
-
-## Done Criteria
-
-Phase 0 is **complete** when:
-
-1. `bun run test` is green (api unit tests across crypto, session, entra, audit, middleware, rbac, routes).
-2. `bun run typecheck` is green for both apps.
-3. Playwright E2E tests pass.
-4. A real M365 user can sign in, sees the shell with their tenant/role, and the audit log records the login.
-5. Sign-out clears the cookie and re-prompts login.
-
-## Out of Scope for Phase 0 (deferred)
-
-- ID token JWKS verification (Phase 1 W1 hardening)
-- Sessions revocation list (Phase 2 with device cap)
-- Self-service tenant signup (Phase 3)
-- Order / customer / stage / document / alert features (Phase 1 weeks 1-6)
-- TanStack Router file-based routing (Phase 1 W1)
-- shadcn/ui primitives setup (Phase 1 W1, when forms appear)
-
-## Risks & Notes
-
-- **Entra app registration friction:** budget 30-60 min for first-time Azure portal setup; redirect URI mismatch is the most common error.
-- **D1 migrations on multi-developer team:** if/when a second developer joins, document `wrangler d1 migrations apply` in onboarding (already in README).
-- **Cookie SameSite=Lax** works for localhost cross-port (5173 ↔ 8787) because the Vite proxy forwards `/auth` to the Worker, keeping the session cookie same-origin from the browser's POV.
+1. All 18 tasks ✅
+2. IQ + OQ checklists all green
+3. Hash-chain verifier validates entire `audit_log` from genesis
+4. Demo e-sig flow works end-to-end with real M365 + Cloudflare Access
+5. No `tenant_id` columns anywhere (grep `tenant_id` in `apps/api/src` returns nothing)
+6. Phase 1 can begin (orders + customers + Lot/UDI)
