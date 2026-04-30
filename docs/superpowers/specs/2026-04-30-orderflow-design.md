@@ -179,7 +179,7 @@ users.team_id FK            -- 員工屬哪個部門
 
 - 租戶設定 `high_value_threshold`（如 100 萬 NTD）。
 - 訂單 `amount > threshold` → 進階段 4 前需 sales_manager 或 admin 簽核。
-- 簽核當作 micro-stage 內部記錄（不顯示在主流程進度條上）。
+- 簽核以 `order_stages` row 表示，`stage_name='approval_high_value'`，`hidden_in_progressbar=true`，僅在訂單詳情側欄列出。
 - 通知透過 Teams + Email 推送主管。
 
 ### 4.5 代理 / 共享機制
@@ -433,9 +433,9 @@ interface NotificationAdapter {
 
 ### 6.3 Email
 
-- Resend API（或 Mailchannels via Workers）。
+- MVP 用 Resend API（Workers binding）。Adapter 介面允許未來換 SendGrid / Mailchannels。
 - 模板（i18n）：`alert-yellow`, `alert-red`, `stage-advanced`, `order-completed`, `digest`。
-- 失敗自動 fallback 到備用 SMTP（如 SendGrid）。
+- 失敗 fallback：MVP 不做備用 vendor，僅靠 Queue retry；Phase 2 再評估 SendGrid 備援。
 
 ### 6.4 Teams
 
@@ -489,7 +489,7 @@ interface NotificationAdapter {
 - 直傳 R2（Workers presigned URL，避免大檔過 Worker CPU 限制）。
 - 檔案類型限制：pdf / jpg / png / xlsx / csv / docx。
 - 單檔 ≤ 25 MB。
-- 病毒掃描（可選 ClamAV 服務或先省略）。
+- 病毒掃描：MVP 不做（內部使用，信任已 SSO 的員工）；Phase 3 SaaS 化前需評估 ClamAV / Cloudflare WAF 掃描。
 
 ---
 
