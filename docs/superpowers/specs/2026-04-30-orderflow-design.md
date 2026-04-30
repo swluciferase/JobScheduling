@@ -1,837 +1,888 @@
-# OrderFlow — 業務專案進度管理系統設計規格
+# OrderFlow — 醫療器材場內部訂單與品質管理系統設計規格
 
-- 文件版本：v0.1（brainstorm 完成稿）
+- 文件版本：**v0.2（QMS / Part 11 重新定位）**
 - 撰寫日期：2026-04-30
 - 撰寫者：swlucifer@gmail.com（與 Claude 協作）
 - 狀態：待 user review，後續進入 implementation plan
+- 變更摘要（v0.1 → v0.2）：移除 multi-tenant SaaS 定位；加入 ISO 13485 + TFDA + FDA 21 CFR 820 + 21 CFR Part 11 合規範圍；加入 Lot/UDI/Serial 追溯、電子簽章、hash-chained 稽核軌跡、NCR/CAPA/客訴/文件管制模組；新增軟體驗證與資料保留章節
 
 ---
 
 ## 1. 系統定位
 
-從訂單接收到出貨完成的業務專案進度管理系統，主要面向「製造業 + 批發/經銷」混合業態，支援多種訂單類型在同一租戶下並行運作。
+從訂單接收到出貨完成的**內部**訂單與品質管理系統，整合 ISO 13485 / 21 CFR 820 要求的生產／驗收／追溯／不符合品／CAPA／客訴流程。
 
-- **第一階段使用對象**：本公司內部業務、生產、倉管、會計、主管。
-- **長期定位**：多租戶 SaaS 架構（multi-tenant），保留外賣其他公司的能力。
-- **不在範圍內**：外部客戶端介面（不開放客戶登入查詢自己訂單）。
+- **使用對象**：本公司內部業務、生產、倉管、品保（QA/QC）、會計、主管、稽核員。**不**對外開放。
+- **產業屬性**：自有設計製造（own design and manufacture）的 Class II 醫療器材製造商。
+- **法規目標**：
+  - ISO 13485:2016（國際 QMS 主軸）
+  - 衛福部食藥署（TFDA）醫療器材品質管理系統準則（GMP）
+  - FDA 21 CFR Part 820（Quality System Regulation, QSR — 美國輸入）
+  - FDA 21 CFR Part 11（Electronic Records / Electronic Signatures）
+- **不在範圍內**：
+  - 對外公開租戶註冊／SaaS／訂閱付費
+  - 設計管制（DHF）— 由獨立 PLM/QMS 系統處理，本系統可建立索引連結但不儲存設計記錄
+  - 校驗管理（calibration）— 連結現有外部系統，不重做
+  - 服務維修記錄（820.200）— v1 不實作，預留資料模型
+  - 統計技術（820.250）— v1 不實作
 
 ### 1.1 核心需求
 
-1. 同時追蹤多筆專案的執行進度（從訂單到出貨完成）。
-2. 每階段預警機制，需可由管理員微調閾值。
-3. 多角色權限與通知機制。
-4. Web 為主、行動端 PWA 支援，含倉管條碼掃描功能。
-5. 預留 Microsoft Teams MCP 整合。
+1. 同時追蹤多筆訂單從接單到出貨的完整生命週期。
+2. 每階段預警機制，含 SLA／物流異常／交期承諾／NCR 結案／CAPA 結案／客訴法定通報期限。
+3. 多角色權限，含**職責分離（separation of duties）**：建單者不得自行核可同筆訂單超過閾值。
+4. Web 為主、行動端 PWA 支援，含 UDI/Lot 條碼掃描（驗收、揀貨、最終檢驗）。
+5. **Microsoft Teams 整合（內部用）**：staff 透過 Teams Copilot 查詢訂單狀態與簡單寫入操作；MCP server 強制 OAuth Device Flow 並對 critical write 強制電子簽章。
+6. **QMS 整合**：
+   - 不符合品（NCR, 820.90）登錄與處置簽核
+   - CAPA（820.100）流程與效益評估
+   - 客訴（820.198）登錄、調查、結案、TFDA/FDA 通報旗標
+   - 文件管制（820.40 / Part 11 11.10(k)）SOP/WI 版本與審核
+   - 訓練記錄（820.25）對應角色授權
+7. **電子簽章**（Part 11 11.50 / 11.70 / 11.100 / 11.200 / 11.300）覆蓋所有 GxP-critical 寫入操作。
+8. **稽核軌跡不可竄改**（Part 11 11.10(e)）：hash-chain 連結每筆 audit log。
+9. **年度 QMS 稽核報表**：可一鍵彙整管理審查需要的 KPI、NCR/CAPA 趨勢、權限變更、訓練覆蓋。
 
 ### 1.2 規模假設
 
-- 單租戶並行訂單：~數十筆
-- 單租戶員工：≤ 200
-- 單租戶月訂單量：≤ 5,000
-- 第一年租戶數：≤ 50
+- 並行訂單：~數十筆
+- 員工：≤ 200
+- 月訂單量：≤ 1,000（醫療器材製造節奏）
+- 月 NCR：≤ 50
+- 月客訴：≤ 30
+- 法定保留期：**7 年**（醫療器材記錄）
+
+### 1.3 不採用的方案（與 v0.1 差異）
+
+| v0.1 規劃 | v0.2 變更 | 原因 |
+|----------|---------|------|
+| Multi-tenant 資料庫，所有 table 帶 `tenant_id` | 單一公司部署，移除 `tenant_id` 欄位 | QMS 系統屬於受管制設備，不混租 |
+| 自助註冊 + 計畫收費 | 不開放 | 內部系統 |
+| 公開 URL（`api.orderflow.example.com`）| 內網 + Cloudflare Access Zero Trust 閘道 | 醫療器材資安要求 |
+| 一般 audit_log（append-only） | hash-chain immutable audit_log + RFC 3161 timestamp（可選） | Part 11 11.10(e) |
+| Stage 推進為單純權限 check | Critical stage 需 e-sig + 雙因素 | Part 11 11.200 |
+| 訂單品項只有 SKU/qty | 訂單品項加上 Lot/UDI/Serial/製造日/有效日 | 820.60 / 820.65 / UDI Rule |
 
 ---
 
-## 2. 階段範本（Stage Templates）
+## 2. 法規範圍對照表
 
-提供兩套預設範本，每個租戶可微調：增刪階段、調整 SLA、開關「可選/條件式」階段。
+每個系統功能需明確對應到法規條文，作為 IQ/OQ/PQ 驗證 traceability matrix 的基礎。
 
-### 2.1 製造業範本（11 階段）
-
-| # | 階段 | 條件 / 預設啟用 | SLA 黃 / 紅 | 預設執行者 |
-|---|------|---------------|------------|-----------|
-| 1 | 訂單確認 | 必要 | 4h / 1d | sales |
-| 2 | 客戶簽核（報價、規格確認） | 可選，預設開 | 2d / 5d | sales |
-| 3 | 打款確認 — 定金 | 可選，預設開 | 3d / 7d | accountant |
-| 4 | 生產排程 | 必要 | 1d / 3d | sales / ops |
-| 5 | 採購備料 | 必要 | 距生產日 -2d / -0d | ops |
-| 6 | 生產製造 | 必要 | 落後 20% / 40% | ops |
-| 7 | 品質檢驗（QC） | 必要 | 1d / 2d | ops |
-| 8 | 打款確認 — 尾款 | 可選，預設開 | 2d / 5d | accountant |
-| 9 | 包裝出貨 | 必要 | 1d / 2d | ops |
-| 10 | 報關（B/L、Invoice、PL） | **條件式**：`shipping_country != 'TW'` 自動啟用 | 1d / 3d | ops |
-| 11 | 物流配送 | 必要 | 預計到貨 +1d / +3d | 系統自動 |
-
-### 2.2 批發 / 經銷範本（7 階段）
-
-| # | 階段 | 條件 | SLA 黃 / 紅 | 預設執行者 |
-|---|------|------|------------|-----------|
-| 1 | 訂單確認 | 必要 | 2h / 1d | sales |
-| 2 | 客戶簽核 | 可選 | 1d / 3d | sales |
-| 3 | 打款確認 | 可選 | 2d / 5d | accountant |
-| 4 | 備貨揀貨 | 必要 | 0.5d / 2d | ops |
-| 5 | 包裝出貨 | 必要 | 0.5d / 1d | ops |
-| 6 | 報關 | 條件式 | 1d / 3d | ops |
-| 7 | 物流配送 | 必要 | 預計到貨 +1d / +3d | 系統自動 |
-
-### 2.3 條件式階段觸發
-
-訂單建立或地址變更時，後端依 `shipping_country` 重新計算 active stages：
-- `shipping_country == 'TW'` → 跳過「報關」
-- `shipping_country != 'TW'` → 自動插入「報關」於「包裝出貨」與「物流配送」之間
+| 法規條款 | 系統實作位置 | 驗證方式 |
+|---------|-------------|---------|
+| **ISO 13485 §4.1.6** 軟體驗證 | Validation Master Plan + IQ/OQ/PQ | 文件 + 測試報告 |
+| **ISO 13485 §4.2.4 / §4.2.5** 文件控制與記錄 | Document Control 模組 + audit_log retention | 系統測試 |
+| **ISO 13485 §6.2** 人員能力／訓練 | Training Records 模組 | 系統測試 |
+| **ISO 13485 §7.5.8** 識別與追溯 | Lot/UDI/Serial fields + DHR | 系統測試 |
+| **ISO 13485 §8.3** 不合格品 | NCR 模組 | 系統測試 |
+| **ISO 13485 §8.5** 改善 | CAPA 模組 | 系統測試 |
+| **21 CFR 820.25** 人員 | Training Records | 系統測試 |
+| **21 CFR 820.40** 文件管制 | Document Control 模組 | 系統測試 |
+| **21 CFR 820.60** 識別 | Lot/UDI/Serial | 系統測試 |
+| **21 CFR 820.65** 追溯 | Lot trace forward + backward query | 系統測試 |
+| **21 CFR 820.70(i)** 製程控制軟體驗證 | VMP + IQ/OQ/PQ | 文件 |
+| **21 CFR 820.80** 接收／製程中／最終驗收 | Stage acceptance records + e-sig | 系統測試 |
+| **21 CFR 820.86** 驗收狀態 | order_items.acceptance_status | 系統測試 |
+| **21 CFR 820.90** 不合格品 | NCR 模組 | 系統測試 |
+| **21 CFR 820.100** CAPA | CAPA 模組 | 系統測試 |
+| **21 CFR 820.180** 一般記錄要求 | Retention policy + export | 系統測試 |
+| **21 CFR 820.184** DHR | DHR 自動彙整 | 系統測試 |
+| **21 CFR 820.186** DMR 索引 | 連結至外部 PLM | 設計確認 |
+| **21 CFR 820.198** 客訴檔 | Complaint 模組 + MDR/Vigilance flag | 系統測試 |
+| **21 CFR Part 11 §11.10(a)** 系統驗證 | VMP | 文件 |
+| **21 CFR Part 11 §11.10(b)** 可生成副本 | Order/NCR/CAPA 全 PDF + CSV 匯出 | 系統測試 |
+| **21 CFR Part 11 §11.10(c)** 記錄保護 | 7 年保留 + R2 immutable bucket + 異地備份 | 系統測試 + IT 政策 |
+| **21 CFR Part 11 §11.10(d)** 存取限制 | M365 SSO + MFA + Cloudflare Access + RBAC | 系統測試 |
+| **21 CFR Part 11 §11.10(e)** 安全稽核軌跡 | Hash-chained audit_log（read-only API） | 系統測試 |
+| **21 CFR Part 11 §11.10(f)** 操作順序檢查 | Stage state machine（不可跳階） | 系統測試 |
+| **21 CFR Part 11 §11.10(g)** 權限檢查 | RBAC matrix | 系統測試 |
+| **21 CFR Part 11 §11.10(h)** 裝置檢查 | Cloudflare Access device posture（Phase 5） | 系統測試 |
+| **21 CFR Part 11 §11.10(i)** 訓練 | Training Records 連結 | 系統測試 |
+| **21 CFR Part 11 §11.10(j)** 責任政策 | 連結至 SOP（人員手冊） | 文件 |
+| **21 CFR Part 11 §11.10(k)** 系統文件管制 | Document Control 模組 | 系統測試 |
+| **21 CFR Part 11 §11.50** 簽章呈現 | E-sig 顯示姓名／日期／意涵於記錄旁 | 系統測試 |
+| **21 CFR Part 11 §11.70** 簽章與記錄連結 | esig FK + 不可移除 | 系統測試 |
+| **21 CFR Part 11 §11.100** 一般要求 | M365 帳號唯一不重用 | M365 + 系統測試 |
+| **21 CFR Part 11 §11.200** 簽章組件 | M365 SSO 身分（component 1）+ 密碼再驗證（component 2） | 系統測試 |
+| **21 CFR Part 11 §11.300** ID/密碼管制 | M365 password policy + MFA + 帳號鎖定 | M365 設定 |
 
 ---
 
-## 3. 預警機制（三層架構）
+## 3. 角色、權限與職責分離
 
-### 3.1 Layer 1：階段 SLA 計時器
+### 3.1 角色清單（6 角色）
 
-- 每個 `order_stages` 進入時記錄 `entered_at`。
-- Worker Cron `alert-scanner` 每 15 分鐘掃 `status='active'` 的階段。
-- 計算 `elapsed = now - entered_at`：
-  - `elapsed >= sla_yellow_hours` → 黃燈
-  - `elapsed >= sla_red_hours` → 紅燈
-- 升級時 `INSERT alerts` 並 push 到 notification queue。
+| 角色 code | 中文名 | 範圍 | 主要職責 |
+|----------|-------|------|---------|
+| `admin` | 系統管理員 | 全系統 | 帳號／角色／模板／系統設定（受 access review 管制） |
+| `qa_manager` | 品保主管 | 全系統 | NCR/CAPA/客訴 結案核可、release for shipment 簽章、年度稽核報表 |
+| `sales_manager` | 業務主管 | 自管團隊 | 高金額訂單核可、團隊 KPI |
+| `sales` | 業務 | 自身訂單 | 接單／報價／客戶溝通 |
+| `ops` | 生產／倉管／QC 操作員 | 全訂單 | 生產推進、揀貨、條碼掃描、In-process check |
+| `accountant` | 會計 | 全訂單金流 | 收款登錄、發票、AR aging |
+| `viewer` | 審計／訪客 | 全系統 read-only | 唯讀（內外部稽核員、外部 ISO/FDA 稽核員臨時帳號） |
 
-### 3.2 Layer 2：物流追蹤異常
+> v0.1 的 6 角色擴為 7 角色：新增 `qa_manager`，因為 QMS critical 簽章不能下放到 `admin`（admin 主要是 IT 角色，與品質決策應分離）。
 
-- Worker Cron `logistics-poller` 每 60 分鐘輪詢未完成的物流。
-- 規則：
-  - 24h 無更新 → 黃燈
-  - 狀態為「投遞失敗 / 退回」 → 紅燈
-- 國內優先用黑貓 API，其他國內貨運記單號（人工或 17track）。
-- 國際用 DHL / FedEx 官方 API。
+### 3.2 權限矩陣（節錄關鍵動作）
 
-### 3.3 Layer 3：交期承諾預警
+| 動作 | admin | qa_manager | sales_manager | sales | ops | accountant | viewer |
+|------|-------|-----------|--------------|-------|-----|-----------|--------|
+| 建立／修改訂單 | ✓ | – | ✓ | own | – | – | – |
+| 核可訂單（≥ NT$500k） | – | – | ✓ | – | – | – | – |
+| 推進一般階段 | ✓ | ✓ | ✓ | own | ✓ | – | – |
+| **QC 通過（e-sig）** | – | ✓ | – | – | ✓\* | – | – |
+| **Release for shipment（e-sig）** | – | ✓ | – | – | – | – | – |
+| 建立 NCR | ✓ | ✓ | – | – | ✓ | – | – |
+| **NCR disposition（e-sig）** | – | ✓ | – | – | – | – | – |
+| 建立 CAPA | ✓ | ✓ | – | – | – | – | – |
+| **CAPA effectiveness 結案（e-sig）** | – | ✓ | – | – | – | – | – |
+| 登錄客訴 | ✓ | ✓ | ✓ | ✓ | – | – | – |
+| **客訴結案（e-sig）+ MDR 通報判定** | – | ✓ | – | – | – | – | – |
+| 上傳／核可 quality document（e-sig） | ✓ | ✓ | – | – | – | – | – |
+| 登錄付款 | – | – | – | – | – | ✓ | – |
+| 帳號／角色管理 | ✓ | – | – | – | – | – | – |
+| 季度 access review 簽核 | – | ✓ | – | – | – | – | – |
+| 年度稽核報表產出 | ✓ | ✓ | – | – | – | – | view only |
+| 唯讀 audit log | ✓ | ✓ | – | – | – | – | ✓ |
 
-- 訂單欄位 `promised_delivery_date`。
-- 距交期 ≤ 3 工作日且未到包裝階段 → 黃燈
-- 距交期 ≤ 0 工作日且未出貨 → 紅燈
+\*ops 僅限執行 QC 檢查（記錄結果），但 release decision（通過 / 不通過 → 是否進入 NCR）需 `qa_manager` e-sig。
 
-### 3.4 升級鏈（預設值，可配置）
+### 3.3 職責分離（Separation of Duties, SoD）規則
+
+- **規則 SoD-1**：建單人（`orders.created_by`）不得作為同筆訂單的審批人（`orders.approved_by`）。
+- **規則 SoD-2**：NCR 建立人（`ncr.reported_by`）不得作為同筆 NCR 的處置決策人（`ncr.disposed_by`）。
+- **規則 SoD-3**：CAPA owner（`capa.owner_id`）不得作為同筆 CAPA 的 effectiveness 結案人（`capa.closed_by`）。
+- **規則 SoD-4**：Document 撰寫者（`documents.created_by`）不得作為同份文件審核者（`documents.approved_by`）。
+- 系統於 transaction 層強制執行；違反時回 `409 Conflict` + audit log。
+
+### 3.4 季度 access review
+
+- 每季度第 1 個工作日，`access-review-cron` 自動：
+  1. 產出每位 active user 的當前角色＋上季登入次數＋上季敏感操作數
+  2. 寄信給 `qa_manager` + `admin` 要求逐人 confirm
+  3. 90 天未 confirm 的帳號自動 `disabled`（重新啟用需 e-sig）
+- 結果儲存於 `access_reviews` 表，作為年度稽核證據。
+
+### 3.5 帳號生命週期
+
+- 入職：HR 提交→`admin` 建立 M365 帳號→指派系統角色（記錄 training 完成才解鎖）
+- 異動：角色變更需 `admin` + `qa_manager` 雙簽（e-sig）
+- 離職：HR 通知 24 小時內 `admin` disable（systemd cron 每 4h scan M365 disabled list）
+
+---
+
+## 4. 訂單資料模型與追溯（DHR 基礎）
+
+### 4.1 訂單品項擴充欄位
+
+每筆 `order_items` row 對應一個製造批次（lot）或一個序號單元，必須具備：
+
+| 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|
+| `id` | TEXT (ULID) | ✓ | – |
+| `order_id` | FK | ✓ | – |
+| `sku` | TEXT | ✓ | DMR 產品代碼 |
+| `name` | TEXT | ✓ | – |
+| `qty` | INT | ✓ | – |
+| `unit_price` | DECIMAL | ✓ | – |
+| `lot_no` | TEXT | ✓\* | 製造批號（820.60） |
+| `udi_di` | TEXT | ✓\* | UDI Device Identifier |
+| `udi_pi` | TEXT | – | UDI Production Identifier（lot/serial/exp 編入） |
+| `serial_no_range` | TEXT | – | 若為單台序號管制：起訖序號（"SN001-SN010"） |
+| `manufacture_date` | DATE | ✓\* | – |
+| `expiry_date` | DATE | – | 若有 shelf life |
+| `acceptance_status` | ENUM | ✓ | `pending` / `in_process` / `accepted` / `rejected` / `quarantine`（820.86） |
+| `qc_inspector_id` | FK users | – | – |
+| `qc_signed_at` | TIMESTAMP | – | – |
+| `qc_esig_id` | FK e_signatures | – | Part 11 簽章連結 |
+
+\*在訂單品項離開「採購備料」階段時必填。建立階段可暫存空值。
+
+### 4.2 DHR（Device History Record）自動彙整
+
+每筆訂單可一鍵產生符合 820.184 的 DHR PDF，內含：
+1. 製造日期（`manufacture_date` 範圍）
+2. 製造數量（sum `qty`）
+3. 出貨／放行數量
+4. 驗收記錄（每個 stage acceptance + e-sig）
+5. Primary identification label（從 documents 中 `doc_type=label` 抽取）
+6. Device identification（UDI DI + PI）+ Lot / Serial 控制號
+7. NCR 連結（若有）
+8. 出貨記錄與簽章
+
+### 4.3 追溯查詢（820.65）
+
+- **Forward trace**：給 lot_no，列出所有出貨給哪些客戶／訂單／日期。
+- **Backward trace**：給訂單 → 列出所用 lots → （v2 連動 ERP 列出原料來源）。
+- 提供 CSV／PDF 匯出（recall scenario 演練）。
+
+---
+
+## 5. 階段範本（QMS-aware）
+
+延續 v0.1 的 11/7 stage 範本，但每個 stage 補上：
+- `requires_acceptance_record`：bool — 是否寫入 `acceptance_records`
+- `requires_esig`：bool — 推進前需 Part 11 e-sig
+- `esig_meaning`：enum `review` / `approval` / `responsibility` / `authorship`
+- `qms_clause`：對應法規條款字串（用於追溯 traceability matrix）
+
+### 5.1 製造業範本（11 階段，QMS 增強）
+
+| # | stage_key | 中文名 | acceptance | e-sig | meaning | QMS 條款 |
+|---|-----------|-------|-----------|------|---------|---------|
+| 1 | `received` | 訂單確認 | – | – | – | – |
+| 2 | `approval` | 客戶簽核 | – | – | – | – |
+| 3 | `deposit_paid` | 定金 | – | – | – | – |
+| 4 | `incoming_inspection` | 來料檢驗 | ✓ | ✓ | review | 820.80(a) |
+| 5 | `production_planning` | 生產排程 | – | – | – | – |
+| 6 | `production` | 生產製造 | ✓ | – | – | 820.70 |
+| 7 | `in_process_qc` | 製程中檢驗 | ✓ | ✓ | review | 820.80(b) |
+| 8 | `final_qc` | 最終檢驗 | ✓ | ✓ | approval | 820.80(c) |
+| 9 | `release_for_shipment` | 出貨放行 | ✓ | ✓ | **approval** | 820.80(d), 820.184 |
+| 10 | `final_paid` | 尾款 | – | – | – | – |
+| 11 | `packed_shipped` | 包裝出貨 | – | ✓ | responsibility | – |
+| – | `customs` | 報關 | – | – | – | 條件式 |
+| – | `delivered` | 物流送達 | – | – | – | 系統自動 |
+
+> v0.1 11 stages 重組：拆出 `incoming_inspection`、`in_process_qc`、`final_qc`、`release_for_shipment` 四個獨立 acceptance stage，符合 820.80。
+
+### 5.2 批發 / 經銷範本
+
+純通路，**移除**（公司是自有設計製造，不做純批發）。若未來新增 OEM 代工子公司，再加回。
+
+### 5.3 階段範本管制
+
+- 範本本身屬於 quality document：修改需 `admin` + `qa_manager` e-sig，建立新版本，舊版鎖定，已開單者沿用舊版（記錄 `orders.stage_template_version`）。
+- 不允許「直接編輯目前範本」— 一律 clone → 修改 → 簽核 → 發布。
+
+---
+
+## 6. 預警機制（五層）
+
+延續 v0.1 三層 + 新增兩層 QMS 警示。
+
+### 6.1 Layer 1：階段 SLA 計時器
+
+同 v0.1。SLA 改寫入 `stage_template.stages_json` 而非 hardcode。
+
+### 6.2 Layer 2：物流追蹤異常
+
+同 v0.1。
+
+### 6.3 Layer 3：交期承諾預警
+
+同 v0.1。
+
+### 6.4 Layer 4：NCR 結案逾期（NEW）
+
+- NCR `target_disposition_date` 距今 ≤ 3 工作日 → 黃
+- 已逾期未 disposed → 紅，升級至 `qa_manager`
+- 預設 disposition 期：14 工作日（可設定）
+
+### 6.5 Layer 5：CAPA / 客訴法定通報期限（NEW）
+
+- CAPA effectiveness review 期限預設 90 天；逾期紅燈
+- **客訴 + 嚴重不良反應旗標**：依 TFDA 醫療器材通報辦法／FDA 21 CFR 803 MDR：
+  - **死亡 / 嚴重傷害**：30 日內 → 距 deadline 7 日黃、距 deadline 1 日紅、逾期立即 page admin + qa_manager
+  - **故障可能造成死亡 / 嚴重傷害**：30 日內，同上
+  - **其他**：依個案
+
+### 6.6 升級鏈
+
+延續 v0.1。對於 QMS critical alert，預設升級對象變為 `qa_manager` 而非 `sales_manager`。
+
+---
+
+## 7. 通知頻道
+
+延續 v0.1：Email（Resend）+ Microsoft Teams（Graph API channel webhook）+ Slack（incoming webhook）+ Web Push（PWA）。
+
+QMS 變更：
+- **客訴 MDR 30 日警示**強制走 Email + Teams + Slack 三路同時送（避免單通道失效）
+- **Release for shipment 簽章**完成後自動通知 sales（你的訂單可以出貨了）
+
+---
+
+## 8. 認證、SSO、存取控制
+
+### 8.1 雙層閘道
 
 ```
-黃 alert：
-  T=0:00   notify 業務（email + in_app）
-  T=0:30   重送 業務（teams）
-  T=1:00   升級 sales_manager（teams + email）
-  T=2:00   升級 admin（teams + slack + email）
-
-紅 alert：
-  T=0:00   notify 業務 + sales_manager（email + teams）
-  T=0:30   升級 admin（email + teams + slack）
-  T=1:00   未 resolve → 全 admin 群（再推一次）
+Internet
+   ↓
+[Cloudflare Access — Zero Trust gate]
+   identity = M365 Entra ID + MFA enforced + Device posture (Phase 5)
+   ↓
+[Cloudflare Pages / Workers]
+   application JWT (HS256, HttpOnly cookie, 2h absolute, 30min idle)
+   ↓
+[D1 + R2 + KV + Queues]
 ```
 
-升級時間每租戶可在設定頁微調。
+- Cloudflare Access 是第一道：未通過直接 403，沒到應用 layer
+- 應用 layer 仍走 OIDC PKCE 取得 ID token → 換取 application session
+- 雙層的好處：即使應用 JWT 被偷，沒有 Cloudflare Access cookie 也進不來；反之亦然
 
-### 3.5 抑制策略
+### 8.2 Session 政策
 
-- 同 alert / channel / recipient 24h 內不重送。
-- 同 user 5 分鐘內 ≥ 3 條 alert → 切換為摘要模式（每 10 分鐘合併送出）。
-- 工作時間（user 設定）外的黃 alert 延後到上班開頭；紅 alert 強制送（可由 user 關閉）。
-- 假日靜音：tenant 設國定假日，黃 alert 延後；紅 alert 視 prefs。
-- 訂單 completed/cancelled → 取消未送的 alert。
+- Idle timeout：30 分鐘無動作自動登出
+- Absolute timeout：2 小時必須重新 SSO（critical 操作之間 ≤ 2h，符合 Part 11 11.200(b) 同 session 簽章）
+- 並行裝置限制：3（沿用 artisebio-web 現有政策）
+- 強制重認證觸發：
+  - 任何 e-sig 操作（無論 idle 多久都要密碼）
+  - admin 角色管理頁進入
+  - access review 簽核
 
-### 3.6 人工觸發 alert
+### 8.3 MFA
 
-業務 / 主管可在訂單詳情手動點「標紅」並指定通知對象（用於客戶緊急要求等情境）。
+- 由 M365 Entra ID 強制（Conditional Access policy）
+- 應用層不重做，但會讀 ID token `amr` claim 確認確實有 `mfa`，否則拒絕
+
+### 8.4 IP / 設備管制（Phase 5）
+
+- Cloudflare Access policy：只允許公司 VPN 出口 IP + 已註冊裝置（EDR 確認）
+- 訪客 viewer 帳號（外部稽核員）：時效式 magic link，不走 Entra；24h 過期，全程 read-only
 
 ---
 
-## 4. 角色與權限
+## 9. 電子簽章（21 CFR Part 11 完整實作）
 
-### 4.1 6 種角色
+### 9.1 何時需要 e-sig
 
-| 角色 | 中文 | 主要職責 |
-|------|------|---------|
-| `admin` | 管理員 | 全租戶操作、設定、人員 |
-| `sales_manager` | 業務主管 | 看本部門訂單、簽核高額、邀請部門業務 |
-| `sales` | 業務 | 自己負責的訂單 CRUD、客戶管理 |
-| `ops` | 生產 / 倉管 | 階段 4-7、9-11 推進、條碼掃描更新 |
-| `accountant` | 會計 | 階段 3、8（打款）、發票上傳、財務報表 |
-| `viewer` | 檢視者 | 全部唯讀 |
+| 動作 | meaning |
+|------|---------|
+| Incoming inspection 通過／不通過 | review |
+| In-process QC 通過／不通過 | review |
+| Final QC 通過／不通過 | approval |
+| **Release for shipment** | approval |
+| 出貨包裝確認 | responsibility |
+| NCR disposition（rework / scrap / use-as-is / return） | approval |
+| CAPA closure（effectiveness verified） | approval |
+| 客訴結案 + MDR 判定 | approval |
+| Quality document 審核發布 | approval |
+| 階段範本變更發布 | approval |
+| 高金額訂單核可 | approval |
+| 帳號角色變更 | approval |
 
-### 4.2 權限矩陣（節錄關鍵）
+### 9.2 簽章流程（Part 11 11.200 兩組件）
 
-| 動作 | admin | sales_mgr | sales | ops | accountant | viewer |
-|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| 看訂單 | 全部 | 本部門全部 | 自己負責 | 出貨中+經手 | 全部 | 全部唯讀 |
-| 編輯訂單 | ✅ | 本部門 | 自己 | ❌ | ❌ | ❌ |
-| 階段 1, 2, 4 | ✅ | ✅ | ✅ | 4 排程 | ❌ | ❌ |
-| 階段 3, 8（打款） | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| 階段 5-7, 9-11 | ✅ | 唯讀 | 唯讀 | ✅ | ❌ | ❌ |
-| 高額簽核（>租戶門檻） | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| 上傳發票 / 收款憑證 | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
-| 財務報表 | ✅ | 本部門 | ❌ | ❌ | 全部 | ❌ |
-| 人員管理 | ✅ | 邀本部門業務 | ❌ | ❌ | ❌ | ❌ |
-| 看 audit log | ✅ | 本部門 | ❌ | ❌ | 財務相關 | ❌ |
-| MCP API token | 發行 | 用自己的 | 用自己的 | 用自己的 | 用自己的 | ❌ |
+```
+使用者點「簽章」
+  ↓
+彈窗顯示：
+  - 你正在簽：<記錄類型 + 摘要>
+  - 意涵：<review / approval / responsibility / authorship>
+  - 你的姓名：<從 M365 帶入>
+  - 你的角色：<...>
+  - 簽章時間：<server now, UTC + local>
+  - 請輸入密碼以確認（密碼 = M365 密碼，透過 Entra resource owner password 流程驗證；若公司禁用 ROPC，改為「按下後跳出 Entra interactive auth」彈窗）
+  ↓
+按下「我已閱讀並同意」
+  ↓
+後端：
+  1. 重認證使用者（Entra）
+  2. 計算 hash：sha256(user_id + record_type + record_id + meaning + record_canonical_json + timestamp)
+  3. INSERT e_signatures 表
+  4. 將 e_sig.id 寫回原記錄（不可變更，只能新增 supersede 簽章）
+  5. INSERT audit_log（hash chain）
+  6. 顯示簽章證明（PDF stamp）
+```
 
-### 4.3 部門 / 團隊
+### 9.3 簽章呈現（Part 11 11.50）
+
+每份 PDF（DHR、NCR、CAPA、客訴、quality doc）末尾必含：
+
+```
+─── Electronic Signatures ────────────────────────────────
+[1] 王小明 (qa_manager) — Approval — 2026-04-30 14:32:11 UTC
+    意涵：Final QC pass for order ORD-20260430-0001 lot L240430-A
+    Signature ID: esig_01HXX...
+─────────────────────────────────────────────────────────
+```
+
+### 9.4 簽章記錄資料模型
 
 ```sql
-teams (
-  id, tenant_id FK,
-  name,                     -- "業務一部" 等
-  manager_user_id FK,
-  created_at
-)
-
-users.team_id FK            -- 員工屬哪個部門
+CREATE TABLE e_signatures (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  user_name_snapshot TEXT NOT NULL,    -- 簽章當時姓名（不隨後續改名變動，Part 11 11.70）
+  user_role_snapshot TEXT NOT NULL,
+  record_type TEXT NOT NULL,           -- 'order_stage' / 'ncr' / 'capa' / 'complaint' / 'document' / ...
+  record_id TEXT NOT NULL,
+  meaning TEXT NOT NULL,               -- 'review' / 'approval' / 'responsibility' / 'authorship'
+  reason TEXT,                          -- 自由文字（QC unpassed reason 等）
+  record_hash TEXT NOT NULL,           -- 簽章當時記錄 canonical JSON 的 sha256
+  signed_at TIMESTAMP NOT NULL,
+  reauth_method TEXT NOT NULL,         -- 'm365_password' / 'm365_mfa_step_up'
+  ip_address TEXT,
+  user_agent TEXT,
+  prev_audit_hash TEXT,                -- audit chain 連結
+  audit_id TEXT NOT NULL,              -- FK audit_log.id
+  superseded_by TEXT,                   -- 後續更正簽章（不刪除原簽，新增 supersede）
+  CONSTRAINT esig_no_delete CHECK (1=1) -- 應用層強制 no-DELETE
+);
+CREATE INDEX idx_esig_record ON e_signatures(record_type, record_id);
 ```
 
-- `sales` 之間：同部門互相可見（依 `users.team_id`）。
-- `sales_manager` 看本部門全部。
-- 跨部門協作走 `order.shared_with_user_ids` 明確授權。
+> 「不可變更」於 D1 沒有 row-level lock，靠 (a) 應用層只暴露 INSERT，(b) audit_log hash chain 偵測，(c) 定期 R2 immutable backup。
 
-### 4.4 高額訂單簽核
+### 9.5 失效處理
 
-- 租戶設定 `high_value_threshold`（如 100 萬 NTD）。
-- 訂單 `amount > threshold` → 進階段 4 前需 sales_manager 或 admin 簽核。
-- 簽核以 `order_stages` row 表示，`stage_name='approval_high_value'`，`hidden_in_progressbar=true`，僅在訂單詳情側欄列出。
-- 通知透過 Teams + Email 推送主管。
-
-### 4.5 代理 / 共享機制
-
-- `admin` 可代任何角色操作，audit_log 標記 `acted_as`。
-- 業務出差可暫時 share 訂單給同事（最長 30 天，到期自動撤回）。
+- 員工離職：`users.disabled = true`，但歷史簽章保留（Part 11 11.300(d)：lost ID/password 後續仍 valid 直到主動 invalidate）
+- 簽章修正：不修改原簽章，新增 supersede 簽章並關聯
+- 偽簽防範：每次簽章必經 SSO 重認證；若 30 秒內 5 次密碼錯，鎖帳號 15 分鐘並 page admin
 
 ---
 
-## 5. 資料模型
+## 10. 稽核軌跡（Hash-chained, Immutable）
 
-### 5.1 主要 Tables（共 15 個）
-
-```
-tenants
-users
-teams
-customers
-stage_templates
-orders
-order_items
-order_stages
-documents
-logistics
-alerts
-notifications
-notification_prefs
-audit_log
-sessions
-api_keys              -- Phase 2 MCP
-tenant_integrations   -- Teams/Slack webhook、carrier API key 等
-```
-
-### 5.2 核心 Schema
+### 10.1 資料模型
 
 ```sql
-tenants (
-  id TEXT PK,                 -- ULID
-  name, slug,                 -- slug 用於 URL: /t/<slug>
-  plan TEXT,                  -- free/pro/enterprise
-  entra_tenant_id,            -- M365 SSO
-  high_value_threshold DECIMAL DEFAULT 1000000,
-  locale_default DEFAULT 'zh-TW',
-  created_at
-)
-
-users (
-  id, tenant_id FK,
-  email,                      -- (tenant_id, email) UNIQUE
-  display_name,
-  entra_oid,                  -- M365 OID
-  role TEXT,                  -- admin/sales_manager/sales/ops/accountant/viewer
-  team_id FK NULL,
-  status,                     -- active/suspended/invited
-  teams_user_id, slack_user_id,
-  created_at
-)
-
-teams (
-  id, tenant_id FK,
-  name, manager_user_id FK,
-  created_at
-)
-
-customers (
-  id, tenant_id FK,
-  name, tax_id,
-  contact_name, contact_phone, contact_email,
-  billing_address, shipping_address_default,
-  payment_terms,              -- net30/cod/prepaid_30/prepaid_50/...
-  credit_limit DECIMAL, currency_default,
-  notes, tags JSON,
-  is_active, created_at
-)
-
-stage_templates (
-  id, tenant_id FK,
-  name, type,                 -- manufacturing/wholesale
-  stages JSON,                -- 階段陣列：name, sla_yellow, sla_red, optional, condition
-  is_default
-)
-
-orders (
-  id, tenant_id FK,
-  order_no,                   -- (tenant_id, order_no) UNIQUE
-  customer_id FK,
-  owner_user_id FK,           -- 負責業務
-  template_id FK,
-  type TEXT,                  -- manufacturing/wholesale
-  status,                     -- active/completed/cancelled/on_hold
-  shipping_country,
-  amount DECIMAL, currency,
-  promised_delivery_date,
-  current_stage_idx,
-  shared_with_user_ids JSON,
-  created_at, completed_at
-)
-
-order_items (
-  id, tenant_id FK, order_id FK,
-  line_no, sku, product_name,
-  qty, unit, unit_price, subtotal,
-  bom_ref TEXT NULL, notes
-)
-
-order_stages (
-  id, order_id FK,
-  stage_idx, stage_name,
-  status,                     -- pending/active/completed/skipped
-  entered_at, completed_at,
-  sla_yellow_hours, sla_red_hours,
-  alert_state TEXT,           -- none/yellow/red
-  next_escalation_at,         -- 升級鏈時序
-  assignee_user_id, notes
-)
-
-documents (
-  id, tenant_id FK, order_id FK,
-  doc_type,                   -- po/invoice/packing_list/bom/customs/qc/other
-  source,                     -- generated/uploaded
-  file_key,                   -- R2 key
-  file_name, mime_type, size_bytes,
-  metadata JSON,
-  uploaded_by, created_at
-)
-
-logistics (
-  id, order_id FK,
-  carrier,                    -- tcat/hct/ezship/sf/dhl/fedex/manual
-  tracking_no,
-  status, last_update_at,
-  estimated_delivery_at, delivered_at,
-  raw_response JSON, poll_count
-)
-
-alerts (
-  id, tenant_id FK, order_id FK, stage_id FK,
-  severity,                   -- yellow/red
-  reason,                     -- sla_exceeded/logistics_stale/promised_date_at_risk/manual
-  triggered_at, acknowledged_at, resolved_at,
-  acknowledged_by_user_id,
-  manual_triggered_by_user_id NULL
-)
-
-notifications (
-  id, tenant_id FK,
-  channel,                    -- email/in_app/teams/slack/mcp
-  recipient_user_id,
-  alert_id FK NULL,
-  template_id, payload JSON,
-  status,                     -- queued/sent/failed
-  external_id,                -- 第三方訊息 ID
-  sent_at, error
-)
-
-notification_prefs (
-  user_id PK,
-  email_enabled, teams_enabled, slack_enabled, inapp_enabled,
-  yellow_channels JSON, red_channels JSON,
-  digest_enabled,
-  work_hours_start, work_hours_end,
-  work_days INT,              -- bitmap
-  dnd_until, override_red_in_dnd
-)
-
-audit_log (
-  id, tenant_id FK,
-  actor_user_id, acted_as_user_id NULL,
-  via TEXT,                   -- web/mobile/mcp/system
-  action,                     -- order.create/stage.advance/...
-  target_type, target_id,
-  before JSON, after JSON,
-  ip, user_agent, created_at
-)
-
-sessions (
-  id, user_id FK,
-  device_label,
-  expires_at, last_active_at,
-  ip, user_agent
-)
-
-api_keys (                    -- Phase 2 MCP
-  id, tenant_id FK, user_id FK,
-  name, scope,                -- read_only/read_write
-  key_hash, last_used_at,
-  expires_at NULL, created_at, revoked_at NULL
-)
-
-tenant_integrations (
-  id, tenant_id FK,
-  type,                       -- teams/slack/tcat/dhl/fedex/email
-  config JSON,                -- 加密 API key、webhook URL
-  enabled, last_test_at, created_at
-)
+CREATE TABLE audit_log (
+  id TEXT PRIMARY KEY,                 -- ULID
+  seq INTEGER NOT NULL UNIQUE,         -- 嚴格遞增，全域單調
+  ts TIMESTAMP NOT NULL,               -- server UTC
+  actor_user_id TEXT,                  -- null 表系統
+  actor_source TEXT NOT NULL,          -- 'web' / 'api' / 'mcp' / 'system' / 'cron'
+  ip_address TEXT,
+  user_agent TEXT,
+  action TEXT NOT NULL,                -- 'order.created' / 'esig.signed' / 'ncr.disposed' / ...
+  record_type TEXT,
+  record_id TEXT,
+  before_json TEXT,                    -- 變更前狀態（diff 用）
+  after_json TEXT,                     -- 變更後狀態
+  metadata_json TEXT,                  -- 額外資料
+  prev_hash TEXT NOT NULL,             -- 上一筆 audit_log 的 row_hash
+  row_hash TEXT NOT NULL               -- sha256(canonical(this_row 除 row_hash 外))
+);
+CREATE INDEX idx_audit_record ON audit_log(record_type, record_id, ts);
+CREATE INDEX idx_audit_actor ON audit_log(actor_user_id, ts);
+CREATE INDEX idx_audit_seq ON audit_log(seq);
 ```
 
-### 5.3 多租戶資料隔離
-
-- 所有非系統表都帶 `tenant_id`。
-- Workers middleware 解析 SSO session 後，將 `tenantId` 注入請求 context。
-- DB 層用 Drizzle 的 query helper 強制 `WHERE tenant_id = ?`，漏帶會 throw。
-- 自動測試覆蓋：每個 endpoint 跑「非本租戶 user 嘗試取資料 → 必須回 404/403」。
-
-### 5.4 多租戶資料庫策略（漸進式）
+### 10.2 hash-chain 演算法
 
 ```
-Stage 1（≤ 50 租戶）：       單一 D1 + tenant_id 欄位
-Stage 2（50-500 租戶）：     sharded D1，按 tenant_id hash 分到 N 個 D1
-Stage 3（特定大客戶要求隔離）：每租戶獨立 D1，KV 路由
+canonical = JSON.stringify({
+  seq, ts, actor_user_id, actor_source, ip_address, user_agent,
+  action, record_type, record_id,
+  before_json, after_json, metadata_json,
+  prev_hash
+}, sorted keys)
+row_hash = sha256(canonical)
 ```
 
-`getDb(tenantId)` helper 抽象化，從 1 升 2/3 不改 query 邏輯。
+寫入時：
+1. SELECT MAX(seq), row_hash FROM audit_log → prev_seq, prev_hash
+2. seq = prev_seq + 1
+3. 計算 row_hash
+4. INSERT（D1 transaction）
+
+驗證時（年度稽核）：
+- 從 seq=1 起逐筆重新計算，與 stored row_hash 比對
+- 若有任一筆不符 → 整鏈斷裂，列出斷點供調查
+
+### 10.3 RFC 3161 timestamping（Phase 4）
+
+- 每日 00:00 對最新 audit_log row_hash 取 RFC 3161 timestamp（free TSA：FreeTSA / DigiCert）
+- 將 timestamp token 存入 `audit_timestamps` 表
+- 提供「給定日期前的 audit log 不可被偽造」的外部第三方證據
+
+### 10.4 不可變保護
+
+- 應用層：route 層 INSERT only，無 UPDATE / DELETE 端點
+- DB 層：D1 沒有 row-level immutability，但靠 trigger 阻擋（D1 支援基本 trigger）：
+
+```sql
+CREATE TRIGGER no_audit_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is immutable'); END;
+CREATE TRIGGER no_audit_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is immutable'); END;
+```
+
+- 備援：每日 export 全 audit_log 至 R2 immutable bucket（write once policy）
+
+### 10.5 保留期
+
+- audit_log：**7 年**
+- 每年舊紀錄歸檔至 R2 cold storage（`audit-archive/<year>/`），保留可查詢能力
 
 ---
 
-## 6. 通知派送機制
+## 11. QMS 模組
 
-### 6.1 整體流程
+### 11.1 NCR（Nonconforming Product, 820.90）
 
 ```
-[CRON] alert-scanner（15min） ──┐
-                                ├──▶ [Queue: notifications]
-[CRON] logistics-poller（60min）─┤
-                                │
-[App] 手動觸發 / 階段事件     ──┘
-                                          │
-                                          ▼
-                              [Worker: notification-dispatcher]
-                                          │
-                ┌─────────┬───────────────┼───────────────┬─────────┐
-                ▼         ▼               ▼               ▼         ▼
-              email     in_app          teams           slack      mcp
-           (Resend)    (DO + WS)    (Graph API)    (chat.postMsg)  (Phase 2)
+建立 NCR
+  - 來源：incoming inspection / in-process / final QC / customer complaint
+  - 不合格描述、影響批次（lot_no list）、影響數量、影響機台
+  - 立即措施（隔離 quarantine / 標記 hold）→ 自動將相關 order_items.acceptance_status = 'quarantine'
+  ↓
+QA 主管調查 + disposition（e-sig）
+  - rework / scrap / use-as-is（需風險評估文件） / return-to-supplier
+  - 影響 DHR（自動連結至受影響訂單的 DHR）
+  ↓
+（若需要）建立 CAPA
+  ↓
+結案
 ```
 
-### 6.2 Channel Adapter 介面
+資料模型：`ncr (id, ncr_no, source, source_ref_id, description, affected_lots_json, affected_qty, severity, reported_by, reported_at, target_disposition_date, disposition, disposition_reason, disposed_by, disposed_at, esig_id, capa_id, status, closed_at)`
 
-```ts
-interface NotificationAdapter {
-  send(input: {
-    user: User;
-    template: TemplateId;
-    vars: Record<string, unknown>;
-    locale: string;
-  }): Promise<{ ok: boolean; externalId?: string; error?: string }>;
-}
+### 11.2 CAPA（820.100）
+
+```
+建立 CAPA
+  - 來源：NCR / 客訴 / 內部稽核 / 管理審查
+  - 問題描述、根本原因分析（5-Why or fishbone 附件）
+  - Action plan（多筆 action_items：負責人、due date）
+  - Owner: <user>
+  ↓
+執行 actions
+  - 每筆 action 完成後標記 + 證據文件
+  ↓
+Effectiveness 評估（30 / 60 / 90 天後）
+  - 自動排定 review reminder
+  - QA 主管評估是否有效（e-sig）
+  ↓
+結案 / 重啟（無效則回到 root cause 分析）
 ```
 
-新增 LINE / Telegram / 自家 webhook 只需實作此介面並註冊。
+資料模型：`capa (id, capa_no, source, source_ref_id, problem, root_cause, owner_id, target_close_date, status, closed_by, closed_at, effectiveness_verified, esig_id_close)` + `capa_actions (id, capa_id, description, owner_id, due_date, completed_at, evidence_doc_id)`
 
-### 6.3 Email
+### 11.3 Customer Complaints（820.198）
 
-- MVP 用 Resend API（Workers binding）。Adapter 介面允許未來換 SendGrid / Mailchannels。
-- 模板（i18n）：`alert-yellow`, `alert-red`, `stage-advanced`, `order-completed`, `digest`。
-- 失敗 fallback：MVP 不做備用 vendor，僅靠 Queue retry；Phase 2 再評估 SendGrid 備援。
+```
+登錄客訴
+  - 來源：客戶來電 / Email / 業務轉達 / 上市後監督
+  - 受影響產品（SKU + lot_no）
+  - 嚴重度初判：death / serious_injury / malfunction_could_cause_serious_harm / other
+  ↓
+觸發法定通報計時器（若 severity ≥ malfunction_could_cause）
+  - TFDA：30 日（嚴重不良反應 7 日）
+  - FDA MDR (21 CFR 803)：30 日（death/serious injury）, 30 日（malfunction）
+  ↓
+QA 主管調查
+  - 調查報告（描述、原因、是否需召回、是否需通報）
+  - 連結 NCR / CAPA（若需要）
+  ↓
+通報判定（e-sig）
+  - 是否通報 TFDA / FDA / 其他主管機關
+  - 通報 reference number 紀錄
+  ↓
+回覆客戶 + 結案（e-sig）
+```
 
-### 6.4 Teams
+資料模型：`complaints (id, complaint_no, customer_id, received_at, received_via, product_sku, lot_no, severity, description, investigation, root_cause, requires_recall, requires_mdr_report, mdr_reference, response_to_customer, response_at, closed_by, closed_at, esig_id_close)` + `complaint_attachments (...)`
 
-- **第一階段使用 Bot Framework + Graph API**，**僅頻道通知**（不私訊）。
-- 訂單預警送到租戶設定的指定頻道（`tenant_integrations.config.teams_channel_id`）。
-- Adaptive Card 格式，含「查看訂單」「認領處理」按鈕。
-- 認領按鈕透過 invoke action 回呼系統 API。
+### 11.4 Document Control（820.40 / Part 11 11.10(k)）
 
-### 6.5 Slack
+兩個 document 子系統，**不要混淆**：
 
-- Slack Bolt SDK 或直接 `chat.postMessage`。
-- Block Kit 格式，與 Teams Adaptive Card 結構等價。
-- 同樣只發頻道（不私訊）。
+| 子系統 | 對象 | 範例 |
+|-------|------|------|
+| **Order Documents** | 與某筆訂單綁定 | PO、Quote、BOM、Packing List、Invoice、Shipping Doc、DHR PDF |
+| **Quality Documents** | 全域文件管制 | SOP、Work Instruction、表單範本、產品規格、訓練教材 |
 
-### 6.6 In-App
+Quality Documents 流程：
+```
+Draft（撰寫者）
+  ↓
+Review（reviewer e-sig）
+  ↓
+Approved（approver e-sig，必須 ≠ 撰寫者，SoD-4）
+  ↓
+Effective（生效日，可排程未來日）
+  ↓
+Superseded（新版發布，舊版自動 superseded，保留 7 年）
+  ↓
+Obsoleted（不再使用）
+```
 
-- D1 寫一筆 → Durable Object push WebSocket → 前端 toast + bell badge。
+資料模型：`quality_documents (id, doc_no, title, doc_type, version, status, effective_from, effective_to, content_r2_key, created_by, reviewed_by, approved_by, esig_review_id, esig_approve_id, superseded_by, retention_until)` + `document_revisions (id, doc_id, version, change_summary, ...)`
 
-### 6.7 失敗重試
+### 11.5 Training Records（820.25）
 
-- Cloudflare Queue 指數退避：1m → 5m → 15m → 1h → 6h，5 次後丟 DLQ。
-- 第三方 503 → 自動降級補送 email。
+```
+- 每位員工有 training profile：completed_trainings[]
+- Quality Document 標記為「require_training=true」+ trainees=[role list]
+- 文件發布或 revision → 系統發 training 任務給對應 role 員工
+- 員工點擊「我已閱讀並了解」→ 記錄 training_completion + 簽章
+- 角色指派時驗證：所需 trainings 都完成才允許指派
+```
 
-### 6.8 Idempotency
-
-通知 payload dedup key = `alertId + channel + escalation_step`，KV TTL 24h。
+資料模型：`trainings (id, doc_id, doc_version, ...)` + `training_assignments (id, training_id, user_id, assigned_at, completed_at, esig_id)`
 
 ---
 
-## 7. 文件管理
+## 12. 物流整合
 
-### 7.1 6 類文件支援
+延續 v0.1：黑貓（國內）+ 17track 聚合（國際 DHL/FedEx/UPS/EMS）。
 
-| 類型 | doc_type | 來源 | 結構化欄位 |
-|------|----------|------|----------|
-| 訂單 / 報價單 | `po` | generated（系統表單填寫） | order_no, customer, items, amount |
-| 發票 / 出貨單 | `invoice` | generated | invoice_no, items, tax, total |
-| 裝箱單 | `packing_list` | generated | boxes, items per box, weight |
-| BOM / 工單 | `bom` | uploaded | metadata.parts JSON |
-| 報關文件（B/L、Invoice、PL） | `customs` | uploaded | metadata.bl_no, hs_code |
-| QC 報告 | `qc` | uploaded | metadata.test_results |
-
-### 7.2 系統產生 PDF
-
-- PO / Invoice / Packing List / 出貨單：用 `@react-pdf/renderer` 或 `pdfmake`。
-- 多語模板（zh-TW / en）。
-- 出貨單自動印 QR（角落 2cm × 2cm，payload = `https://app/o/<id>?t=<hmac>`）。
-
-### 7.3 上傳
-
-- 直傳 R2（Workers presigned URL，避免大檔過 Worker CPU 限制）。
-- 檔案類型限制：pdf / jpg / png / xlsx / csv / docx。
-- 單檔 ≤ 25 MB。
-- 病毒掃描：MVP 不做（內部使用，信任已 SSO 的員工）；Phase 3 SaaS 化前需評估 ClamAV / Cloudflare WAF 掃描。
+QMS 變更：
+- 物流事件納入 audit_log（透過 `actor_source='system'`）
+- 出貨後若收件確認（`event_code=delivered`），自動觸發 release stage 完成事件並寫入 DHR
 
 ---
 
-## 8. 物流串接
+## 13. 文件管理（Order Docs + Quality Docs + DHR）
 
-### 8.1 國內
+### 13.1 Order Documents
 
-- **黑貓宅急便**：官方 API（須申請），輪詢 GET 取狀態。
-- **新竹 / 宅配通 / 順豐（台灣段）**：無公開 API → 人工貼單號 + 17track 統一查詢。
-- **手動模式**：所有不支援 API 的單號可用此模式，倉管手動標記「已簽收」。
+延續 v0.1：6 種類別（PO / Quote / BOM / Packing List / Invoice / Shipping Doc）+ R2 + presigned upload + 系統產生 PDF（Quote / Invoice）。
 
-### 8.2 國際
+新增：
+- DHR 自動產生（`generate_dhr(order_id)` 拼合所有 stage records、acceptance、簽章、UDI、lot info）
+- 病毒掃描：Phase 4 接入（ClamAV worker proxy）
 
-- **DHL Express API**：tracking + label。
-- **FedEx Web Services**：tracking。
-- **17track.net**：統一查詢備援（多 carrier）。
+### 13.2 Quality Documents
 
-### 8.3 carrier 抽象
+獨立模組，非綁定訂單。詳見 §11.4。
 
-```ts
-interface CarrierAdapter {
-  carrier: string;
-  pollStatus(trackingNo: string): Promise<LogisticsStatus>;
-  estimateDelivery?(...): Promise<Date>;
-}
+### 13.3 R2 命名與 immutability
+
+```
+order-docs/<order_id>/<doc_type>/v<n>-<ulid>-<filename>
+quality-docs/<doc_no>/v<version>/<filename>
+audit-archive/<year>/<month>/audit-log-<batch>.jsonl.gz
+dhr/<order_id>/dhr-<order_no>-v<n>.pdf
+ncr-attachments/<ncr_id>/<filename>
+capa-attachments/<capa_id>/<filename>
+complaint-attachments/<complaint_id>/<filename>
 ```
 
-每個 carrier 實作此介面，dispatcher 依 `logistics.carrier` 路由。
+R2 bucket lifecycle：
+- 一般 R2：可覆寫
+- `r2-immutable` bucket（單獨）：write once（透過 worker policy 拒絕 PUT 已存在的 key）
+- audit-archive 寫入 `r2-immutable`
 
 ---
 
-## 9. SSO 與身份
+## 14. 報表
 
-### 9.1 Microsoft Entra ID（OIDC）
+### 14.1 基本營運報表（Phase 1）
 
-```
-[Browser] /auth/login
-   ↓ 302 → Microsoft login
-[M365] 使用者輸入帳密
-   ↓ /auth/callback?code=...
-[Workers]
-   1. PKCE 換 access_token + id_token
-   2. 驗 id_token JWT (jose, JWKS)
-   3. 取 oid / email / tid / name
-   4. UPSERT user by (tenant_id, entra_oid)
-   5. 第一次登入：role=viewer，通知 admin
-   6. 簽 session JWT (HS256, 7d, HttpOnly cookie)
-```
+- SLA breach 統計（按 stage / 月）
+- 月成交量、月營業額
+- AR aging（accountant 用）
 
-### 9.2 多租戶配置
+### 14.2 QMS 報表（Phase 3-4）
 
-- 每租戶在設定填自己的 `entra_tenant_id`。
-- 多租戶 SaaS 模式用 multi-tenant Azure App，OAuth authority `common`，依 `tid` 對應或自助建立租戶。
+- **NCR trend**：按來源 / 嚴重度 / 月，閉環率
+- **CAPA trend**：開立數 / 結案數 / 平均結案天數 / effectiveness pass rate
+- **客訴 trend**：按嚴重度 / 月，平均回應天數，MDR 通報統計
+- **訓練覆蓋**：每份 quality doc 的指派 vs 完成率
+- **角色變更紀錄**：上季所有 role assignment changes
+- **Audit log integrity report**：hash-chain 驗證結果
 
-### 9.3 預留帳密登入路徑
+### 14.3 年度 QMS 稽核報表（Phase 4）
 
-架構保留 password / magic link，第二階段才開放（給沒有 M365 的客戶）。
-
----
-
-## 10. PWA 與行動端
-
-### 10.1 PWA 設定
-
-- `manifest.webmanifest`（standalone, portrait, theme color, shortcuts: 掃條碼 / 我的待辦）
-- Service Worker：app shell precache + API GET stale-while-revalidate
-- Web Push：iOS 16.4+ 須加到主畫面才能推；Android 直接支援
-- 無離線寫入（mutating 操作必須在線）
-
-### 10.2 條碼 / QR
-
-**訂單 QR**（系統產生，印在出貨單上）：
-- payload: `https://app/o/<orderId>?t=<short_token>`
-- `short_token = HMAC(orderId + tenant_secret).slice(0, 8)`
-
-**SKU 條碼掃描**（揀貨用）：
-- 訂單明細支援逐項掃描勾選
-- 連續掃描模式
-
-### 10.3 掃描技術
-
-- 首選：`BarcodeDetector` API（Chrome/Edge Android、Safari iOS 17+）
-- iOS 16 不支援 → **不做 fallback**（user share < 5%，要求升級或用桌面）
-- Torch API、震動回饋、音效
-
-### 10.4 倉管工作流
-
-```
-1. 開手機（已 SSO，session 14d）
-2. 看「待包裝 3 筆」
-3. 掃訂單條碼 → 進詳情
-4. 揀貨：對 SKU 條碼勾選
-5. 拍出貨照（1-3 張） → 自動上傳 R2
-6. 點「完成本階段」 → 自動進下一階段
-7. 輸入 / 掃物流單號 → 系統開始輪詢
-8. 訂單從待辦消失
-```
+一鍵彙整以下章節，輸出 PDF + Excel：
+1. 管理審查 KPI（ISO 13485 §5.6 inputs）
+2. 客訴趨勢與 MDR 通報
+3. NCR 與 CAPA 趨勢
+4. 訓練完成率
+5. 文件發布／更新紀錄
+6. 角色變更與 access review 結果
+7. Audit log hash-chain 完整性驗證
+8. 軟體變更記錄（從 commit log 擷取）
 
 ---
 
-## 11. Microsoft Teams MCP 整合
+## 15. 資料完整性 ALCOA+
 
-### 11.1 Phase 1：通知（必做，已收斂在 §6.4）
+每筆紀錄需滿足：
 
-僅頻道通知，Adaptive Card with action buttons。
-
-### 11.2 Phase 2：MCP Server
-
-#### 部署
-
-獨立 Worker：`mcp.<domain>`，使用 `@modelcontextprotocol/sdk`。
-
-#### 認證：OAuth Device Flow
-
-```
-1. AI client (Claude Desktop / Teams Copilot) 啟動 MCP 連線
-2. Server 回 device_code + user_code + verification_uri
-3. User 在瀏覽器登入系統並輸入 user_code 授權
-4. AI client 收到 access_token (短 token + refresh)
-5. 後續請求帶 Bearer token
-```
-
-#### 8 個工具
-
-| 工具 | 描述 | 權限 |
-|------|------|------|
-| `list_orders(filter, limit)` | 查詢訂單清單 | read |
-| `get_order(orderId)` | 取單張訂單詳情 | read |
-| `get_order_alerts(scope)` | 取 alert 清單 | read |
-| `search_customer(query)` | 找客戶 | read |
-| `advance_stage(orderId, note, confirm)` | 推進階段 | write |
-| `add_note(orderId, content)` | 加評論 | write |
-| `get_logistics(orderId)` | 取物流狀態 | read |
-| `upload_document(orderId, file_b64, doc_type)` | 上傳文件 | write |
-
-#### 資源（Resources）
-
-- `order:///<id>` — 完整訂單
-- `alerts:///today` — 今日 alert
-- `reports:///sla` — SLA 報表
-
-#### 安全
-
-- 共用系統 RBAC（`canAccessOrder` 等同 web 版）。
-- Token scope ≤ user 本身權限。
-- 每次工具呼叫寫 audit_log，標 `via='mcp'`。
-- Rate limit：60 calls/min/token，超出 429。
-- write 工具強制 `confirm: true` 參數，避免 LLM 誤觸發。
+| 原則 | 系統實作 |
+|------|---------|
+| **A** Attributable（可歸屬） | 必填 `created_by` / `actor_user_id` |
+| **L** Legible（可辨讀） | UTF-8 + 結構化 JSON + PDF 匯出 |
+| **C** Contemporaneous（同步紀錄） | server timestamp，不允許客戶端時間 |
+| **O** Original（原始） | 原始 record + audit_log before/after 都保存 |
+| **A** Accurate（正確） | DB constraint + Zod schema 雙驗 |
+| **C** Complete | 必填欄位限制 |
+| **C** Consistent | Hash chain |
+| **E** Enduring | 7 年保留 |
+| **A** Available | 有時可恢復 + R2 backup |
 
 ---
 
-## 12. 技術棧
+## 16. 資料保留與備份
 
-### 12.1 前端
+### 16.1 保留期
 
-- React 18 + TypeScript + Vite（PWA plugin）
-- Tailwind CSS + shadcn/ui
-- TanStack Query（server state）+ Zustand（client state）
-- TanStack Router
-- react-hook-form + zod
-- dnd-kit（看板拖拉）
-- i18next（zh-TW / en）
+| 資料類型 | 保留期 | 政策依據 |
+|---------|-------|---------|
+| 訂單 / 訂單品項 | 7 年（從出貨日起） | TFDA / FDA |
+| DHR | 7 年（或產品壽命 + 2 年，取較長者） | 820.184 |
+| NCR / CAPA / 客訴 | 7 年 | 820.180 |
+| Quality Documents | 7 年（從 superseded 起） | 820.40 |
+| Training Records | 員工離職 + 7 年 | 820.25 |
+| Audit Log | 7 年 | 820.180 / Part 11 |
+| E-signatures | 同被簽章記錄保留期 | Part 11 11.70 |
 
-### 12.2 後端
+過期資料：歸檔至 R2 cold + 從主 D1 移除（保留索引指向歸檔）。
 
-- Cloudflare Workers + Hono
-- D1 + Drizzle ORM
-- R2（檔案）/ KV（session、idempotency）/ Queues / Durable Objects
-- jose（JWT）
-- @microsoft/microsoft-graph-client / @slack/web-api
-- @modelcontextprotocol/sdk（Phase 2）
+### 16.2 備份政策
 
-### 12.3 工具
+| 對象 | 頻率 | 目的地 | 加密 |
+|------|------|-------|------|
+| D1 全表 | 每日 02:00 | R2 `backups/<date>/` | AES-256（Workers 端） |
+| R2 documents | Cloudflare 自動三副本 | 跨區複製到第二 bucket | R2 內建 |
+| Audit log | 每日 export jsonl.gz | R2 immutable | 內建 |
+| 設定（wrangler secrets） | 每月 export | 1Password vault（手動） | 1Password |
 
-- bun（runtime + pkg manager）
-- wrangler（部署）
-- drizzle-kit（migrations）
-- Vitest + Playwright
+每季演練還原至 staging Worker（restore drill），記錄 RPO（< 24h）/ RTO（< 4h）。
 
 ---
 
-## 13. 目錄結構
+## 17. 軟體驗證（Software Validation）
+
+### 17.1 Validation Master Plan（VMP）
+
+- 系統屬於「QMS-supporting software」（820.70(i) software validation 適用）
+- Risk classification：medium-high（影響產品 release 決策）
+- 驗證範圍：所有 Part 11 / 820 對應功能（見 §2 對照表）
+
+### 17.2 IQ / OQ / PQ
+
+- **IQ（Installation Qualification）**：部署環境、Cloudflare 配置、binding、密鑰存放、版本標記
+- **OQ（Operational Qualification）**：每個模組的功能測試（自動化測試 + 手動 checklist）
+- **PQ（Performance Qualification）**：典型業務情境端到端測試（接單 → 出貨 → DHR）
+
+每次 major release 重跑 OQ／PQ；patch release 跑 regression + 影響範圍 OQ。
+
+### 17.3 Traceability Matrix
+
+每條 user requirement → design spec section → test case → test result。維護於 `docs/validation/traceability-matrix.csv`。
+
+### 17.4 Change Control
+
+- 任何 production deploy 需 PR + reviewer 簽核 + change record（`change_records` 表）
+- High-risk change（schema / Part 11 機制）：admin + qa_manager 雙簽 + regression 測試報告
+- Emergency hotfix：先修，72h 內補 change record + retro
+
+### 17.5 Periodic Review
+
+- 每季：OQ smoke test 重跑、access review、hash-chain integrity check
+- 每年：完整 validation refresh、災難演練、滲透測試
+
+---
+
+## 18. 部署架構
+
+### 18.1 Topology
+
+```
+[公司員工 / 內網]
+   ↓
+[Cloudflare Access — Zero Trust gate]
+   identity provider: M365 Entra ID
+   policy: require MFA + (Phase 5: device posture)
+   ↓
+[Pages: orderflow.internal.<company>.com]   ← 靜態前端
+[Workers: api.orderflow.internal.<company>.com]  ← API
+[Workers: mcp.orderflow.internal.<company>.com]  ← MCP server
+   ↓
+[D1: orderflow-prod]
+[R2: orderflow-docs / orderflow-immutable]
+[KV: orderflow-cache]
+[Queues: orderflow-notifications]
+```
+
+- 公司不對外公開 URL；DNS 為內網專用 + Cloudflare Tunnel（若需遠端）
+- 環境分離：`local` / `staging` / `prod`，各環境獨立 D1 + R2 + Cloudflare Access policy
+
+### 18.2 Secrets
+
+存於 Wrangler secrets：
+- `M365_CLIENT_SECRET`
+- `RESEND_API_KEY`
+- `TEAMS_WEBHOOK_URL`
+- `SLACK_WEBHOOK_URL`
+- `VAPID_PRIVATE_KEY`
+- `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
+- `MCP_INTERNAL_TOKEN`
+- `JWT_SIGNING_KEY` / `AUDIT_HASH_PEPPER`
+
+### 18.3 Network controls
+
+- TLS 1.3 only（Cloudflare 預設）
+- HSTS preload
+- CSP strict + nonce
+- CORS：僅 internal subdomain
+- Rate limiting：Cloudflare WAF + 應用層 token bucket
+
+---
+
+## 19. 目錄結構
 
 ```
 orderflow/
+├── package.json                   # bun workspace
+├── tsconfig.base.json
+├── docs/
+│   ├── superpowers/
+│   │   ├── specs/
+│   │   └── plans/
+│   ├── validation/
+│   │   ├── vmp.md
+│   │   ├── iq-checklist.md
+│   │   ├── oq-tests.md
+│   │   ├── pq-scenarios.md
+│   │   └── traceability-matrix.csv
+│   ├── sops/
+│   │   ├── access-review.md
+│   │   ├── change-control.md
+│   │   ├── incident-response.md
+│   │   ├── backup-restore.md
+│   │   └── disaster-recovery.md
+│   └── DEPLOYMENT.md
 ├── apps/
-│   ├── web/                    # Pages 前端
-│   │   └── src/
-│   │       ├── routes/
-│   │       ├── features/
-│   │       │   ├── orders/ customers/ stages/ alerts/
-│   │       │   ├── documents/ reports/ scanner/ settings/
-│   │       ├── components/ui/
-│   │       ├── lib/
-│   │       └── i18n/
-│   └── api/                    # Workers
-│       └── src/
-│           ├── routes/ services/ db/
-│           ├── auth/ notifications/ logistics/ crons/
-│           └── mcp/            # Phase 2
-├── packages/
-│   ├── shared/                 # types & zod schemas
-│   ├── ui-tokens/
-│   └── notifications-templates/
-└── docs/
-    └── superpowers/specs/
+│   ├── web/                       # React + Vite + Tailwind PWA
+│   ├── api/                       # Cloudflare Workers + Hono + Drizzle
+│   └── mcp/                       # MCP server (internal Teams Copilot)
+└── packages/
+    ├── shared/                    # Zod schemas, types
+    ├── qms/                       # NCR / CAPA / complaints / training logic
+    └── crypto/                    # hash chain + e-sig helpers
 ```
 
 ---
 
-## 14. 部署架構
+## 20. 實作路線圖（5 phases）
 
-```
-[Cloudflare DNS]
-      │
-      ├─▶ pm.app (Pages)        前端 SPA + PWA
-      ├─▶ api.pm.app (Workers)  REST API + Cron + Queue + DO
-      └─▶ mcp.pm.app (Workers)  Phase 2 MCP Server
+| Phase | 範圍 | 估時 | 主要 deliverable |
+|-------|------|------|----------------|
+| **Phase 0** | 單一公司 Foundation：M365 SSO + Cloudflare Access + hash-chain audit + e-sig 框架 + RBAC + UI shell | 2-3 週 | 員工 SSO 進系統，看到空 shell，登入有 audit + 第一個簽章 demo |
+| **Phase 1** | Order MVP + Lot/UDI/Serial + e-sig on critical stages + Documents + DHR + Alerts + Logistics + Kanban | 6-7 週 | 完整接單到出貨流程跑起來，DHR 可印 |
+| **Phase 2** | Mobile PWA + UDI 條碼掃描 + 進階驗收（incoming/in-process/final QC）+ access review + 進階權限 | 4 週 | ops 可手機掃 UDI、品保可結算 release |
+| **Phase 3** | QMS modules：NCR / CAPA / 客訴 / Quality Document Control / Training Records | 5 週 | 公司可在系統內處理不合格品、開 CAPA、登客訴 |
+| **Phase 4** | 年度稽核報表 + MCP for Teams Copilot（內部）+ 軟體驗證 IQ/OQ/PQ + RFC 3161 timestamping + 災難演練 | 4 週 | 通過 ISO 13485 / 21 CFR 820 / Part 11 模擬稽核 |
 
-外部服務：
-  - login.microsoftonline.com (SSO)
-  - graph.microsoft.com (Teams)
-  - slack.com/api
-  - 黑貓 / DHL / FedEx APIs
-  - resend.com (Email)
-```
-
-### 14.1 開發階段（Phase 0-1）
-
-僅在 localhost 跑：
-- `apps/web` 用 `bun run dev`（Vite, port 5173）
-- `apps/api` 用 `wrangler dev` 或 `bun run dev`（port 8787）
-- D1 用 wrangler local SQLite
-- R2 用 wrangler local emulator
-
-### 14.2 公網部署（Phase 2 後決定）
-
-多租戶 URL 預設用路徑：`pm.app/t/<slug>`（不需 wildcard cert）。
-Domain 名稱 / 註冊在 Phase 2 末再決定。
+合計約 21-23 週。
 
 ---
 
-## 15. 開發路線圖
+## 21. 變更紀錄
 
-### Phase 0：地基（2 週）
-
-- 專案 monorepo + workspace + CI
-- D1 schema + initial migrations
-- M365 SSO 端到端
-- UI shell（layout、navigation、i18n）
-- 多租戶 middleware + RBAC framework
-
-### Phase 1：MVP（5-6 週）
-
-- W1：客戶管理 + 訂單 CRUD + 訂單明細
-- W2：階段引擎（templates + advance + history）
-- W3：文件上傳 + 系統產生 PO/Invoice/PL（PDF）
-- W4：預警 cron + 通知抽象 + Email adapter
-- W5：Teams + Slack adapter + 升級鏈
-- W6：物流串接 + 看板 UI + 報表
-
-> **MVP 結束內部可上線**
-
-### Phase 2：行動 + 進階（3-4 週）
-
-- W1：PWA 配置 + 行動端 RWD
-- W2：條碼掃描 + SKU 揀貨
-- W3：高級權限（業務主管、會計專屬視圖、簽核流）
-- W4：報表 / AR aging / SLA 統計
-
-### Phase 3：MCP + SaaS 化（3-4 週）
-
-- W1：MCP server 設計 + OAuth Device Flow
-- W2：8 個工具實作 + audit + rate limit
-- W3：Teams Copilot manifest + Azure App
-- W4：多租戶自助註冊流（外賣選用）
-
-**總計：13-16 週**（單人全職）
+| 版本 | 日期 | 摘要 |
+|------|------|------|
+| v0.1 | 2026-04-30 | 初版：multi-tenant SaaS 定位 |
+| v0.2 | 2026-04-30 | 重新定位：單一公司內部部署，加入 ISO 13485 + 21 CFR 820 + Part 11 完整合規範圍，新增 Lot/UDI/DHR/NCR/CAPA/客訴/文件管制/訓練記錄；audit_log hash-chain；electronic signature 框架；新增 Phase 4 |
 
 ---
 
-## 16. 風險與緩解
+## 22. 待解決事項（Open Items）
 
-| 風險 | 緩解 |
-|------|------|
-| 黑貓 API 申請流程慢 | 先支援手動單號，API 補上 |
-| Teams Bot Azure 註冊耗時 | Phase 1 用 Incoming Webhook 過渡 |
-| D1 大量 cron 撞 CPU 限制 | 分批 + ulid 分頁；單次 ≤ 100 訂單 |
-| iOS PWA 推播限制 | 引導使用者「加到主畫面」 |
-| 多租戶資料外洩 | 中央 middleware + DB row-level + 自動測試 |
-| MCP 工具誤操作 | write 工具強制 `confirm` + dry-run + audit |
-
----
-
-## 17. 規模上限對照
-
-| 指標 | 此架構撐到 |
-|------|----------|
-| 租戶數 | 50（單 D1）／ 500（sharded） |
-| 單租戶員工數 | ~200 |
-| 單租戶訂單 / 月 | ~5,000 |
-| 並行 alert | 數千 / 分鐘 |
-| 月成本（內部用、單租戶） | $5-15 USD |
-| 月成本（50 租戶 SaaS） | $80-200 USD |
-
----
-
-## 18. 已決定的設計選擇（決議記錄）
-
-| 議題 | 決議 |
-|------|------|
-| 系統定位 | 多租戶 SaaS 架構，先內部用 |
-| 產業 | 製造 + 批發混合 |
-| 階段彈性 | 系統範本 + 租戶可微調 |
-| 規模目標 | 數十並行訂單（CF Pages + D1） |
-| 物流 | 國內為主（黑貓 API），國際少量（DHL / FedEx） |
-| 通知管道 | Email + Teams + Slack |
-| 角色 | 6 種：admin / sales_manager / sales / ops / accountant / viewer |
-| SSO | Microsoft Entra ID（M365） |
-| 文件類型 | 6 類全要，系統產生 + 上傳混合 |
-| 行動端 | PWA + 條碼掃描，無離線 |
-| Teams MCP | Phase 1 通知（僅頻道）／ Phase 2 MCP Server |
-| MCP 認證 | OAuth Device Flow |
-| 階段升級時間 | 系統預設 + 可手動調整 |
-| 批次摘要通知 | 啟用 |
-| 紅 alert in DND | 強制送 |
-| 人工觸發 alert | 支援 |
-| 業務主管角色 | 加入（5 → 6） |
-| 會計角色 | 加入 |
-| 客戶外部介面 | 不做 |
-| 訂單 QR 位置 | 出貨單 PDF 角落 2cm × 2cm |
-| SKU 揀貨 | 支援 |
-| iOS 16 fallback | 不做 |
-| MCP 工具集 | 8 個（read 5 + write 3） |
-| 路線圖 | 13-16 週，照 Phase 0/1/2/3 順序 |
-| 第一階段部署 | localhost only |
-| 公網 URL 結構 | 路徑型 `pm.app/t/<slug>`（Phase 2 末再啟用） |
-
----
-
-## 19. 後續步驟
-
-1. User review 此 spec
-2. 進入 implementation plan（writing-plans skill）
-3. Phase 0 啟動
+1. **公司 Entra tenant ID**：取得後填入 `M365_TENANT_ID` secret。
+2. **法規外部委任顧問**：建議聘請 ISO 13485 / FDA 顧問做最終 gap analysis（spec 是 self-assessment，非正式 audit）。
+3. **DMR 連結方式**：Class II DMR 由現有 PLM 系統管理，本系統需要 PLM 提供 read API 或 export 機制（Phase 1 規劃時對齊）。
+4. **TFDA / FDA 通報實際流程**：目前是手動上傳通報文件（不在本系統內 e-submit）。系統僅追蹤 deadline 與通報狀態。
+5. **Cloudflare Access licensing**：確認公司 Cloudflare 方案支援 Zero Trust（Free 50 users / Standard / Enterprise）。
+6. **災難演練：場外備份**：是否需要將 R2 backup 再 mirror 至 AWS S3 / Google Cloud Storage 以避免單點供應商風險？建議列入 Phase 4。
